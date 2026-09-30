@@ -1,0 +1,29 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec
+
+# 本地配置（含个人信息，不上传）
+config.ini
+
+# Excel 数据（含公司数据，不上传）
+*.xlsx
+*.xls
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
