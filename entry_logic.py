@@ -1,7 +1,10 @@
 # @Version  : 1.0
 # @Author   : 小野
-# @File     : entry_logic.py
+# @File     : entry_logic.py 录入、撤回、批量、汇总
 # @Time     : 2026/9/30 13:18
+# @Version : 4.8
+# @Author  : 小野
+# @File    : entry_logic.py
 
 from model_sort import (
     normalize_model, model_sort_key, find_insert_position,
@@ -49,7 +52,6 @@ class EntryManager:
         return result
 
     def _safe_save(self, wb):
-        """安全保存：关掉弹窗，静默保存，失败不崩"""
         try:
             try:
                 self.conn.app.DisplayAlerts = False
@@ -1230,3 +1232,121 @@ class EntryManager:
                 pass
 
         return all_fixes
+
+    # ---------- 清理离职表 ----------
+    def find_empty_sheets(self):
+        """扫描所有 sheet，找出 3-33 行 B 列往后完全没数据的 sheet（离职/空表）"""
+        wb = self.conn.get_active_workbook()
+        if wb is None:
+            return [], "未检测到活动工作簿"
+
+        empty = []
+
+        try:
+            self.conn.app.ScreenUpdating = False
+        except Exception:
+            pass
+        try:
+            self.conn.app.Calculation = -4135
+        except Exception:
+            pass
+        try:
+            self.conn.app.EnableEvents = False
+        except Exception:
+            pass
+
+        try:
+            for sh in wb.Sheets:
+                try:
+                    name = sh.Name
+                except Exception:
+                    continue
+                if name == "合计":
+                    continue
+
+                try:
+                    last_col = self.conn.scan_last_model_col(sh)
+                except Exception:
+                    continue
+
+                if last_col < 2:
+                    empty.append(name)
+                    continue
+
+                try:
+                    rng = sh.Range(sh.Cells(3, 2), sh.Cells(33, last_col))
+                    vals = rng.Value
+                except Exception as e:
+                    print(f"读 {name} 失败: {e}")
+                    continue
+
+                if not isinstance(vals, tuple):
+                    vals = ((vals,),)
+
+                has_data = False
+                for row in vals:
+                    if not isinstance(row, tuple):
+                        row = (row,)
+                    for v in row:
+                        if v is None:
+                            continue
+                        s = str(v).strip()
+                        if s == "":
+                            continue
+                        try:
+                            if abs(float(s)) < 1e-9:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+                        has_data = True
+                        break
+                    if has_data:
+                        break
+
+                if not has_data:
+                    empty.append(name)
+        except Exception as e:
+            return [], f"扫描失败: {e}"
+        finally:
+            try:
+                self.conn.app.ScreenUpdating = True
+            except Exception:
+                pass
+            try:
+                self.conn.app.Calculation = -4105
+            except Exception:
+                pass
+            try:
+                self.conn.app.EnableEvents = True
+            except Exception:
+                pass
+
+        return empty, ""
+
+    def delete_sheets(self, names):
+        """删除指定名字的 sheet"""
+        wb = self.conn.get_active_workbook()
+        if wb is None:
+            return False, "未检测到活动工作簿"
+        try:
+            self.conn.app.DisplayAlerts = False
+        except Exception:
+            pass
+        deleted = 0
+        try:
+            for name in names:
+                try:
+                    wb.Sheets(name).Delete()
+                    deleted += 1
+                except Exception as e:
+                    print(f"删除 {name} 失败: {e}")
+            try:
+                wb.Save()
+            except Exception:
+                pass
+        finally:
+            try:
+                self.conn.app.DisplayAlerts = True
+            except Exception:
+                pass
+        return True, f"已删除 {deleted} 个 sheet"

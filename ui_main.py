@@ -1,6 +1,6 @@
 # @Version  : 1.0
 # @Author   : 小野
-# @File     : ui_main.py
+# @File     : ui_main.py 主界面 + 交互逻辑
 # @Time     : 2026/9/30 13:19
 
 import os
@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QMessageBox, QListWidget,
     QListWidgetItem, QDialog, QInputDialog, QSlider, QFileDialog,
-    QCheckBox, QLayout, QPlainTextEdit
+    QCheckBox, QLayout, QPlainTextEdit, QSpinBox
 )
 from PySide6.QtCore import Qt, QSettings, QTimer, QEvent, Signal, QElapsedTimer, QRect, QSize, QPoint
 
@@ -310,7 +310,6 @@ class MultiDialog(QDialog):
 
 
 class MultiBatchDialog(QDialog):
-    """批量录入：选择多个人员，型号固定，数量逐个输入"""
     def __init__(self, sheet_names, settings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("批量录入 - 选择人员")
@@ -374,7 +373,6 @@ class MultiBatchDialog(QDialog):
 
 
 class CleanEmptyDialog(QDialog):
-    """清理空列确认对话框：可滚动的文本框 + 底部固定按钮"""
     def __init__(self, preview_text, total, sheet_count, parent=None):
         super().__init__(parent)
         self.setWindowTitle("清理空列")
@@ -416,6 +414,343 @@ class CleanEmptyDialog(QDialog):
         super().keyPressEvent(event)
 
 
+class QueryDateDialog(QDialog):
+    def __init__(self, conn, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("查询某天记录")
+        self.resize(700, 760)
+        self.conn = conn
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        layout = QVBoxLayout(self)
+
+        # --- 工作簿选择 ---
+        row_wb = QHBoxLayout()
+        row_wb.addWidget(QLabel("工作簿："))
+        self.cbo_wb = QComboBox()
+        self.cbo_wb.setMinimumWidth(320)
+        self.cbo_wb.currentIndexChanged.connect(self._on_wb_changed)
+        row_wb.addWidget(self.cbo_wb, 1)
+
+        btn_refresh_wb = QPushButton("刷新工作簿")
+        btn_refresh_wb.clicked.connect(self._load_workbooks)
+        row_wb.addWidget(btn_refresh_wb)
+        layout.addLayout(row_wb)
+
+        # --- 日期 + 查询按钮 ---
+        row = QHBoxLayout()
+        row.addWidget(QLabel("日期（几号）："))
+        self.txt_day = QLineEdit()
+        self.txt_day.setFixedWidth(80)
+        self.txt_day.returnPressed.connect(self.do_query)
+        row.addWidget(self.txt_day)
+
+        btn_query = QPushButton("查询")
+        btn_query.clicked.connect(self.do_query)
+        row.addWidget(btn_query)
+
+        btn_all = QPushButton("全选")
+        btn_all.clicked.connect(lambda: self._set_all(True))
+        row.addWidget(btn_all)
+
+        btn_none = QPushButton("全不选")
+        btn_none.clicked.connect(lambda: self._set_all(False))
+        row.addWidget(btn_none)
+
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        # --- 直接输入人员 ---
+        row_manual = QHBoxLayout()
+        row_manual.addWidget(QLabel("或直接输入人员："))
+        self.txt_persons_manual = QLineEdit()
+        self.txt_persons_manual.setPlaceholderText(
+            "留空则用下方勾选；填写则只看这里的人名（逗号/顿号/分号分隔，如：张三,李四）"
+        )
+        self.txt_persons_manual.returnPressed.connect(self.do_query)
+        self.txt_persons_manual.textChanged.connect(self._on_manual_changed)
+        row_manual.addWidget(self.txt_persons_manual, 1)
+
+        btn_clear_manual = QPushButton("清空")
+        btn_clear_manual.clicked.connect(self.txt_persons_manual.clear)
+        row_manual.addWidget(btn_clear_manual)
+        layout.addLayout(row_manual)
+
+        layout.addWidget(QLabel("要查询的 sheet（可多选，输入框非空时忽略这里的勾选）："))
+        self.list_sheets = QListWidget()
+        self.list_sheets.setSelectionMode(QListWidget.MultiSelection)
+        self.list_sheets.setMaximumHeight(150)
+        layout.addWidget(self.list_sheets)
+
+        self.txt_result = QPlainTextEdit()
+        self.txt_result.setReadOnly(True)
+        layout.addWidget(self.txt_result, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.close)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        self._load_workbooks()
+        self.txt_day.setFocus()
+
+    # ---------- 工作簿 / sheet 列表 ----------
+    def _load_workbooks(self):
+        self.cbo_wb.blockSignals(True)
+        self.cbo_wb.clear()
+        self.cbo_wb.blockSignals(False)
+
+        if self.conn.app is None:
+            try:
+                self.conn.connect()
+            except Exception:
+                pass
+        if self.conn.app is None:
+            self._load_sheets()
+            return
+
+        try:
+            active_name = ""
+            try:
+                awb = self.conn.app.ActiveWorkbook
+                if awb is not None:
+                    active_name = awb.Name
+            except Exception:
+                pass
+
+            idx_active = -1
+            i = 0
+            for wb in self.conn.app.Workbooks:
+                try:
+                    nm = wb.Name
+                except Exception:
+                    continue
+                self.cbo_wb.addItem(nm)
+                if nm == active_name:
+                    idx_active = i
+                i += 1
+
+            if idx_active >= 0:
+                self.cbo_wb.setCurrentIndex(idx_active)
+        except Exception as e:
+            print("加载工作簿列表失败:", e)
+
+        self._load_sheets()
+
+    def _on_wb_changed(self, _index):
+        self._load_sheets()
+
+    def _get_selected_wb(self):
+        name = self.cbo_wb.currentText().strip()
+        if not name or self.conn.app is None:
+            return None
+        try:
+            return self.conn.app.Workbooks(name)
+        except Exception:
+            return None
+
+    def _load_sheets(self):
+        self.list_sheets.clear()
+        wb = self._get_selected_wb()
+        if wb is None:
+            return
+        try:
+            for sh in wb.Sheets:
+                try:
+                    n = sh.Name
+                except Exception:
+                    continue
+                if n == "合计":
+                    continue
+                item = QListWidgetItem(n)
+                item.setSelected(True)
+                self.list_sheets.addItem(item)
+        except Exception as e:
+            print("加载 sheet 列表失败:", e)
+
+    def _set_all(self, flag):
+        for i in range(self.list_sheets.count()):
+            self.list_sheets.item(i).setSelected(flag)
+
+    # ---------- 输入框联动：有输入时禁用列表勾选，让人一眼知道用哪个 ----------
+    def _on_manual_changed(self, text):
+        has_manual = bool(text.strip())
+        self.list_sheets.setEnabled(not has_manual)
+        if has_manual:
+            self.list_sheets.setStyleSheet("color: gray;")
+        else:
+            self.list_sheets.setStyleSheet("")
+
+    def _parse_manual_persons(self, raw):
+        for sep in ["，", "、", ";", "；", "\n", "\r", "\t", "|"]:
+            raw = raw.replace(sep, ",")
+        parts = []
+        for p in raw.split(","):
+            p = p.strip()
+            if p:
+                parts.append(p)
+        return parts
+
+    # ---------- 查询 ----------
+    def do_query(self):
+        day_str = self.txt_day.text().strip()
+        try:
+            day = int(day_str)
+            if day < 1 or day > 31:
+                raise ValueError
+        except ValueError:
+            self.txt_result.setPlainText("请输入 1-31 的日期。")
+            return
+
+        wb = self._get_selected_wb()
+        if wb is None:
+            self.txt_result.setPlainText("请选择一个工作簿。")
+            return
+
+        raw_manual = self.txt_persons_manual.text().strip()
+        if raw_manual:
+            selected = self._parse_manual_persons(raw_manual)
+        else:
+            selected = [i.text() for i in self.list_sheets.selectedItems()]
+
+        if not selected:
+            self.txt_result.setPlainText("请至少指定一个人（输入框或勾选列表）。")
+            return
+
+        # 去重但保持输入顺序
+        seen = set()
+        ordered = []
+        for n in selected:
+            if n not in seen:
+                seen.add(n)
+                ordered.append(n)
+        selected = ordered
+
+        row = day + 2
+
+        try:
+            wb_name = wb.Name
+        except Exception:
+            wb_name = "?"
+
+        lines = [f"工作簿：{wb_name}", f"日期：{day} 号（第 {row} 行）", "=" * 40]
+
+        # 若手动输入的人名在 sheet 中不存在，给出提示
+        missing_sheets = []
+        try:
+            all_names = set()
+            for sh in wb.Sheets:
+                try:
+                    all_names.add(sh.Name)
+                except Exception:
+                    continue
+            for n in selected:
+                if n not in all_names:
+                    missing_sheets.append(n)
+        except Exception:
+            pass
+
+        total_overall = 0
+        any_data = False
+
+        try:
+            try:
+                self.conn.app.ScreenUpdating = False
+            except Exception:
+                pass
+
+            for sheet_name in selected:
+                try:
+                    sh = wb.Sheets(sheet_name)
+                except Exception:
+                    continue
+
+                try:
+                    last_col = self.conn.scan_last_model_col(sh)
+                except Exception:
+                    continue
+                if last_col < 2:
+                    continue
+
+                try:
+                    rng_h = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+                    rng_v = sh.Range(sh.Cells(row, 2), sh.Cells(row, last_col))
+                    headers = rng_h.Value
+                    values = rng_v.Value
+                    if not isinstance(headers, tuple):
+                        headers = (headers,)
+                    if not isinstance(values, tuple):
+                        values = (values,)
+                    if headers and isinstance(headers[0], tuple):
+                        headers = headers[0]
+                    if values and isinstance(values[0], tuple):
+                        values = values[0]
+                except Exception as e:
+                    print(f"读 {sheet_name} 失败: {e}")
+                    continue
+
+                items = []
+                sheet_total = 0
+                for h, v in zip(headers, values):
+                    if h is None:
+                        continue
+                    hs = str(h).strip()
+                    if not hs:
+                        continue
+                    try:
+                        v_num = float(v) if v is not None else 0
+                    except (ValueError, TypeError):
+                        v_num = 0
+                    if v_num == 0:
+                        continue
+                    items.append((hs, v_num))
+                    sheet_total += v_num
+
+                if items:
+                    any_data = True
+                    lines.append("")
+                    lines.append(f"【{sheet_name}】")
+                    for name, val in items:
+                        val_str = str(int(val)) if val == int(val) else f"{val:g}"
+                        lines.append(f"    {name}：{val_str}")
+                    if len(items) > 1:
+                        ts = str(int(sheet_total)) if sheet_total == int(sheet_total) \
+                             else f"{sheet_total:g}"
+                        lines.append(f"    小计：{ts}")
+                    total_overall += sheet_total
+        finally:
+            try:
+                self.conn.app.ScreenUpdating = True
+            except Exception:
+                pass
+
+        if missing_sheets:
+            lines.append("")
+            lines.append("未找到以下 sheet：")
+            for n in missing_sheets:
+                lines.append(f"    · {n}")
+
+        if not any_data:
+            lines.append("")
+            lines.append(f"{day} 号没有任何记录。")
+        else:
+            lines.append("")
+            lines.append("=" * 40)
+            ts = str(int(total_overall)) if total_overall == int(total_overall) \
+                 else f"{total_overall:g}"
+            lines.append(f"总计：{ts}")
+
+        self.txt_result.setPlainText("\n".join(lines))
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -449,7 +784,6 @@ class MainWindow(QWidget):
         self._last_sheet = ""
         self._restoring = False
 
-        # 批量录入状态
         self.batch_mode = False
         self.batch_persons = []
         self.batch_index = 0
@@ -481,6 +815,10 @@ class MainWindow(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.monitor_wps)
         self.timer.start(500)
+
+        self._batch_jump_timer = QTimer(self)
+        self._batch_jump_timer.setSingleShot(True)
+        self._batch_jump_timer.timeout.connect(self._batch_do_jump)
 
     def build_ui(self):
         layout = QVBoxLayout(self)
@@ -551,6 +889,10 @@ class MainWindow(QWidget):
         btn_add.clicked.connect(self.do_add_person)
         btn_layout.addWidget(btn_add)
 
+        btn_clean_sheets = QPushButton("清理离职表")
+        btn_clean_sheets.clicked.connect(self.do_clean_empty_sheets)
+        btn_layout.addWidget(btn_clean_sheets)
+
         btn_price = QPushButton("单价表")
         btn_price.clicked.connect(self.do_select_price_file)
         btn_layout.addWidget(btn_price)
@@ -574,6 +916,10 @@ class MainWindow(QWidget):
         btn_summary = QPushButton("修帽子合计统计")
         btn_summary.clicked.connect(self.do_make_summary)
         btn_layout.addWidget(btn_summary)
+
+        btn_query = QPushButton("查询某天记录")
+        btn_query.clicked.connect(self.do_query_date)
+        btn_layout.addWidget(btn_query)
 
         btn_container = QWidget()
         btn_container.setLayout(btn_layout)
@@ -600,6 +946,25 @@ class MainWindow(QWidget):
 
         layout.addLayout(row6)
 
+        row7 = QHBoxLayout()
+        row7.addWidget(QLabel("批量跳转延迟(毫秒)："))
+        self.spin_jump = QSpinBox()
+        self.spin_jump.setRange(0, 10000)
+        self.spin_jump.setSingleStep(100)
+        try:
+            _d = int(self.settings.value("batch_jump_delay_ms", 500, type=int))
+        except Exception:
+            _d = 500
+        if _d < 0:
+            _d = 0
+        if _d > 10000:
+            _d = 10000
+        self.spin_jump.setValue(_d)
+        self.spin_jump.valueChanged.connect(self.on_jump_delay_changed)
+        row7.addWidget(self.spin_jump)
+        row7.addStretch(1)
+        layout.addLayout(row7)
+
         self.log = QLabel("")
         self.log.setWordWrap(True)
         layout.addWidget(self.log)
@@ -611,6 +976,9 @@ class MainWindow(QWidget):
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
         self.show()
         self.settings.setValue("window_on_top", 1 if state else 0)
+
+    def on_jump_delay_changed(self, value):
+        self.settings.setValue("batch_jump_delay", int(value))
 
     # ---------- 批量录入 ----------
     def do_batch_start(self):
@@ -653,6 +1021,7 @@ class MainWindow(QWidget):
         self.batch_model = ""
         self.batch_history = []
         self.batch_mode = True
+        self._batch_jump_timer.stop()
 
         self.btn_batch.setText("退出批量")
 
@@ -669,25 +1038,34 @@ class MainWindow(QWidget):
         self.txt_model.setPlaceholderText("请输入型号（回车后到数量框）")
 
         total = len(self.batch_persons)
+        try:
+            delay = int(self.spin_jump.value())
+        except Exception:
+            delay = 500
         self.log.setText(
             f"批量录入已开始：{first}（1/{total}）\n"
             f"请先输入型号，再输入数量。\n"
+            f"录入完成后会在当前 sheet 停留 {delay} 毫秒供核对，然后自动跳转下一位。\n"
             f"发现录错可按 Ctrl+Z 或点'撤回'回退上一步。\n"
             f"想退出批量：点'退出批量'按钮 或 按 ESC。"
         )
 
     def do_batch_entry(self):
+        if not self.batch_mode:
+            return
+        self._batch_jump_timer.stop()
+
         person = self.batch_persons[self.batch_index]
         total = len(self.batch_persons)
 
-        if not self.batch_model:
-            m = self.txt_model.text().strip()
-            if not m:
-                self.log.setText("请先输入型号")
-                self.txt_model.setFocus()
-                return
+        m = self.txt_model.text().strip()
+        if m:
             self.batch_model = m
-            self.txt_model.setText(m)
+
+        if not self.batch_model:
+            self.log.setText("请先输入型号")
+            self.txt_model.setFocus()
+            return
 
         qty = self.txt_qty.text().strip()
         if not qty:
@@ -732,8 +1110,42 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        self.batch_index += 1
         self.txt_qty.clear()
+
+        idx = self.batch_index + 1
+        if idx >= total:
+            tip = "已是最后一位，稍后自动结束"
+        else:
+            nxt = self.batch_persons[self.batch_index + 1]
+            tip = f"稍后自动跳转到 {nxt}"
+        try:
+            delay = int(self.spin_jump.value())
+        except Exception:
+            delay = 500
+        self.log.setText(
+            f"已录入 {person}（{idx}/{total}）：{self.batch_model} = {qty}\n"
+            f"{tip}（延迟 {delay} 毫秒）\n"
+            f"若要在当前 sheet 继续录入，可直接改型号/数量再回车；Ctrl+Z 撤回；ESC 退出"
+        )
+
+        self._batch_jump_timer.start(max(0, delay))
+        self.txt_qty.setFocus()
+
+    def _batch_do_jump(self):
+        if not self.batch_mode:
+            return
+
+        total = len(self.batch_persons)
+        expected = self.batch_persons[self.batch_index] if self.batch_index < total else ""
+
+        try:
+            current = self.conn.get_active_sheet_name()
+        except Exception:
+            current = ""
+        if current and expected and current != expected:
+            return
+
+        self.batch_index += 1
 
         if self.batch_index >= total:
             done_model = self.batch_model
@@ -761,11 +1173,13 @@ class MainWindow(QWidget):
         self._last_sheet = next_person
         self.refresh_sheets()
 
+        self.txt_qty.clear()
         self.txt_qty.setFocus()
+
         idx = self.batch_index + 1
         self.log.setText(
             f"批量录入：{self.batch_model} - {next_person}（{idx}/{total}）\n"
-            f"可按 Ctrl+Z 或点'撤回'回退上一步；按 ESC 退出批量"
+            f"请输入数量；Ctrl+Z 撤回上一步；ESC 退出批量"
         )
 
     def do_batch_undo(self):
@@ -774,6 +1188,7 @@ class MainWindow(QWidget):
                                     "没有可回退的操作（已经是第一步）")
             return
 
+        self._batch_jump_timer.stop()
         item = self.batch_history.pop()
         person = item["person"]
         rec = item["record"]
@@ -817,7 +1232,10 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "批量回退", f"恢复失败：{e}")
             return
 
-        self.batch_index = max(0, self.batch_index - 1)
+        try:
+            self.batch_index = self.batch_persons.index(person)
+        except ValueError:
+            self.batch_index = max(0, self.batch_index - 1)
 
         try:
             self.conn.activate_sheet(person)
@@ -837,6 +1255,7 @@ class MainWindow(QWidget):
         )
 
     def _cancel_batch(self):
+        self._batch_jump_timer.stop()
         self.batch_mode = False
         self.batch_persons = []
         self.batch_index = 0
@@ -1188,7 +1607,8 @@ class MainWindow(QWidget):
             return
         self._last_sheet = name
         self.refresh_sheets()
-        self.txt_model.setFocus()
+        QTimer.singleShot(50, self._refocus)
+        QTimer.singleShot(200, self._refocus)
 
     def _get_current_sheet(self):
         active = self.conn.get_active_sheet_name()
@@ -1264,6 +1684,43 @@ class MainWindow(QWidget):
             else:
                 self.refresh_sheets()
 
+    def do_clean_empty_sheets(self):
+        """扫描并删除 3-33 行完全没有数据的 sheet（离职/空表）"""
+        empty, err = self.manager.find_empty_sheets()
+        if err:
+            QMessageBox.warning(self, "清理离职表", err)
+            return
+        if not empty:
+            QMessageBox.information(self, "清理离职表",
+                                    "所有 sheet 都有数据，无需清理。")
+            self.log.setText("清理离职表：无空表")
+            return
+
+        preview = "\n".join(f"· {n}" for n in empty[:30])
+        if len(empty) > 30:
+            preview += f"\n…… 共 {len(empty)} 个"
+
+        msg = (
+            f"以下 {len(empty)} 个 sheet 从 3 行到 33 行完全没有数据：\n\n"
+            f"{preview}\n\n"
+            f"是否删除这些 sheet？删除后无法自动恢复。"
+        )
+
+        reply = QMessageBox.question(
+            self, "清理离职表", msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            self.log.setText("已取消清理。")
+            return
+
+        ok, msg2 = self.manager.delete_sheets(empty)
+        self.log.setText(msg2)
+        if ok:
+            QMessageBox.information(self, "清理离职表", msg2)
+            self.refresh_sheets()
+
     def do_clean_empty(self):
         items, err = self.manager.clean_empty_columns_all()
         if err:
@@ -1325,6 +1782,35 @@ class MainWindow(QWidget):
                 print("切换到合计 sheet 失败:", e)
             QMessageBox.information(self, "修帽子合计统计", msg)
             self.refresh_sheets()
+
+    def do_query_date(self):
+        dlg = QueryDateDialog(self.conn, self)
+        dlg.exec()
+
+        def closeEvent(self, event):
+            # 停掉所有定时器，避免关闭后还有回调触发
+            try:
+                self.timer.stop()
+            except Exception:
+                pass
+            try:
+                self._batch_jump_timer.stop()
+            except Exception:
+                pass
+
+            # 主动断开 WPS COM 引用，避免进程残留
+            try:
+                self.conn.wb = None
+            except Exception:
+                pass
+
+            event.accept()
+
+            # 确保整个进程退出
+            try:
+                QApplication.instance().quit()
+            except Exception:
+                pass
 
 
 def run():

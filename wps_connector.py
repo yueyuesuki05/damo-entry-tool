@@ -1,6 +1,6 @@
 # @Version  : 1.0
 # @Author   : 小野
-# @File     : wps_connector.py
+# @File     : wps_connector.py WPS COM 接口封装
 # @Time     : 2026/9/30 13:17
 import win32com.client
 import pythoncom
@@ -33,9 +33,17 @@ class WPSConnector:
 
         pythoncom.CoInitialize()
         for prog_id in ["KET.Application", "ET.Application", "WPS.Application"]:
+            # 先尝试连接已有实例
             try:
                 self.app = win32com.client.GetActiveObject(prog_id)
                 print("连接成功（已运行实例）：", prog_id)
+                return True
+            except Exception:
+                pass
+            # 失败再尝试 Dispatch
+            try:
+                self.app = win32com.client.Dispatch(prog_id)
+                print("连接成功（Dispatch）：", prog_id)
                 return True
             except Exception:
                 continue

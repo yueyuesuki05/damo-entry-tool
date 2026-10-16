@@ -1,6 +1,6 @@
 # @Version  : 1.0
 # @Author   : 小野
-# @File     : model_sort.py
+# @File     : model_sort.py 型号排序规则
 # @Time     : 2026/9/30 13:17
 import re
 

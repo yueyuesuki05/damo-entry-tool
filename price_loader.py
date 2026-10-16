@@ -1,6 +1,6 @@
 # @Version  : 1.0
 # @Author   : 小野
-# @File     : price_loader.py
+# @File     : price_loader.py 单价表读取
 # @Time     : 2026/9/30 13:18
 
 import os
