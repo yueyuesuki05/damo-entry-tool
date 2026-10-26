@@ -4,11 +4,13 @@
 # @Time     : 2026/9/30 13:19
 
 import os
+import re
+from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QMessageBox, QListWidget,
     QListWidgetItem, QDialog, QInputDialog, QSlider, QFileDialog,
-    QCheckBox, QLayout, QPlainTextEdit, QSpinBox
+    QCheckBox, QLayout, QPlainTextEdit, QSpinBox, QCompleter
 )
 from PySide6.QtCore import Qt, QSettings, QTimer, QEvent, Signal, QElapsedTimer, QRect, QSize, QPoint
 
@@ -574,7 +576,7 @@ class QueryDateDialog(QDialog):
         for i in range(self.list_sheets.count()):
             self.list_sheets.item(i).setSelected(flag)
 
-    # ---------- 输入框联动：有输入时禁用列表勾选，让人一眼知道用哪个 ----------
+    # ---------- 输入框联动 ----------
     def _on_manual_changed(self, text):
         has_manual = bool(text.strip())
         self.list_sheets.setEnabled(not has_manual)
@@ -637,7 +639,6 @@ class QueryDateDialog(QDialog):
 
         lines = [f"工作簿：{wb_name}", f"日期：{day} 号（第 {row} 行）", "=" * 40]
 
-        # 若手动输入的人名在 sheet 中不存在，给出提示
         missing_sheets = []
         try:
             all_names = set()
@@ -717,7 +718,7 @@ class QueryDateDialog(QDialog):
                         lines.append(f"    {name}：{val_str}")
                     if len(items) > 1:
                         ts = str(int(sheet_total)) if sheet_total == int(sheet_total) \
-                             else f"{sheet_total:g}"
+                            else f"{sheet_total:g}"
                         lines.append(f"    小计：{ts}")
                     total_overall += sheet_total
         finally:
@@ -739,7 +740,7 @@ class QueryDateDialog(QDialog):
             lines.append("")
             lines.append("=" * 40)
             ts = str(int(total_overall)) if total_overall == int(total_overall) \
-                 else f"{total_overall:g}"
+                else f"{total_overall:g}"
             lines.append(f"总计：{ts}")
 
         self.txt_result.setPlainText("\n".join(lines))
@@ -751,6 +752,395 @@ class QueryDateDialog(QDialog):
         super().keyPressEvent(event)
 
 
+class GlobalQueryDialog(QDialog):
+    def __init__(self, conn, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("综合数据查询")
+        self.resize(700, 650)
+        self.conn = conn
+        self.person_map = {}  # 保存人员与工作簿的映射关系
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        layout = QVBoxLayout(self)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("人员姓名："))
+        self.cbo_person = QComboBox()
+        self.cbo_person.setEditable(True)  # 允许手动输入
+        self.cbo_person.setMinimumWidth(250)
+
+        # 开启模糊查询（包含匹配）
+        completer = self.cbo_person.completer()
+        if completer:
+            completer.setFilterMode(Qt.MatchContains)
+            completer.setCompletionMode(QCompleter.PopupCompletion)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+
+        # 绑定文本变化，实现联动
+        self.cbo_person.currentTextChanged.connect(self._on_person_changed)
+        row1.addWidget(self.cbo_person)
+
+        row1.addWidget(QLabel("日期："))
+        self.txt_day = QLineEdit()
+        self.txt_day.setPlaceholderText("留空=查所有日期")
+        row1.addWidget(self.txt_day)
+
+        layout.addLayout(row1)
+
+        layout.addWidget(QLabel("选择需要查询的工作簿（当前WPS已打开）："))
+        self.list_wbs = QListWidget()
+        self.list_wbs.setSelectionMode(QListWidget.MultiSelection)
+        self.list_wbs.setMaximumHeight(120)
+        layout.addWidget(self.list_wbs)
+
+        self._load_workbooks_and_persons()
+
+        btn_row = QHBoxLayout()
+        btn_all = QPushButton("全选")
+        btn_all.clicked.connect(lambda: self._set_all_wbs(True))
+        btn_row.addWidget(btn_all)
+        btn_none = QPushButton("全不选")
+        btn_none.clicked.connect(lambda: self._set_all_wbs(False))
+        btn_row.addWidget(btn_none)
+
+        btn_query = QPushButton("开始查询")
+        btn_query.clicked.connect(self.do_query)
+        btn_query.setStyleSheet("background-color: #0078D7; color: white; font-weight: bold;")
+        btn_row.addWidget(btn_query)
+
+        layout.addLayout(btn_row)
+
+        self.txt_result = QPlainTextEdit()
+        self.txt_result.setReadOnly(True)
+        layout.addWidget(self.txt_result, 1)
+
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.close)
+        layout.addWidget(btn_close)
+
+    def _on_person_changed(self, text):
+        """人员变动时，联动过滤下方的工作簿列表"""
+        person = re.sub(r'\(.*\)$', '', text).strip()
+
+        if not person:
+            self.list_wbs.clear()
+            return
+
+        # 如果提取到的名字存在于映射表中，只显示对应的工作簿
+        if person in self.person_map:
+            wbs = self.person_map[person]
+            self.list_wbs.clear()
+            for wb in sorted(set(wbs)):
+                item = QListWidgetItem(wb)
+                item.setSelected(True)
+                self.list_wbs.addItem(item)
+        # 如果输入不完整（如只输入了“李金”），不清空列表，避免闪烁
+
+    def _read_range(self, rng):
+        """统一处理 Excel Range.Value 返回值，确保始终返回二维元组"""
+        vals = rng.Value
+        if vals is None:
+            return ()
+        if not isinstance(vals, tuple):
+            return ((vals,),)
+        if not isinstance(vals[0], tuple):
+            return (vals,)
+        return vals
+
+    def _load_workbooks_and_persons(self):
+        self.list_wbs.clear()
+        self.cbo_person.clear()
+        self.person_map.clear()
+
+        if self.conn.app is None:
+            try:
+                self.conn.connect()
+            except Exception:
+                pass
+        if self.conn.app is None:
+            return
+
+        try:
+            for wb in self.conn.app.Workbooks:
+                wb_name = wb.Name
+                for sh in wb.Sheets:
+                    sh_name = sh.Name
+                    if sh_name == "合计":
+                        continue
+
+                    # 1. 一般排单表：Sheet名就是人名
+                    if re.match(r'^[\u4e00-\u9fa5]{2,4}$', sh_name):
+                        self.person_map.setdefault(sh_name, []).append(wb_name)
+                    # 2. 检查表头是否有“姓名”列
+                    else:
+                        used = sh.UsedRange
+                        max_r = min(used.Row + used.Rows.Count - 1, 50)
+                        max_c = min(used.Column + used.Columns.Count - 1, 20)
+                        if max_r < 1 or max_c < 1:
+                            continue
+
+                        r_limit = min(5, max_r)
+                        header_data = self._read_range(sh.Range(sh.Cells(1, 1), sh.Cells(r_limit, max_c)))
+
+                        col_person = -1
+                        for r_idx, row in enumerate(header_data):
+                            for c_idx, v in enumerate(row):
+                                if v and "姓名" in str(v):
+                                    col_person = c_idx + 1
+                                    break
+                            if col_person > 0:
+                                break
+
+                        if col_person > 0:
+                            # 批量读取该列的所有姓名数据
+                            col_vals = self._read_range(sh.Range(sh.Cells(1, col_person), sh.Cells(max_r, col_person)))
+                            for row_vals in col_vals:
+                                v = row_vals[0] if row_vals else None
+                                if v and str(v).strip() and str(v).strip() != "姓名":
+                                    name = str(v).strip()
+                                    if wb_name not in self.person_map.get(name, []):
+                                        self.person_map.setdefault(name, []).append(wb_name)
+
+            # 生成下拉框选项
+            for name, wbs in sorted(self.person_map.items()):
+                wb_str = ",".join(sorted(set(wbs)))
+                self.cbo_person.addItem(f"{name}({wb_str})")
+
+            # 如果加载到了人，默认选中第一个，触发一次联动
+            if self.cbo_person.count() > 0:
+                self.cbo_person.setCurrentIndex(0)
+
+        except Exception as e:
+            print("加载工作簿失败:", e)
+
+    def _set_all_wbs(self, flag):
+        for i in range(self.list_wbs.count()):
+            self.list_wbs.item(i).setSelected(flag)
+
+    def do_query(self):
+        # 从下拉框提取真实人名（去掉括号部分）
+        raw_person = self.cbo_person.currentText().strip()
+        person = re.sub(r'\(.*\)$', '', raw_person).strip()
+
+        date_str = self.txt_day.text().strip()
+
+        if not person:
+            QMessageBox.warning(self, "提示", "请输入或选择人员姓名")
+            return
+
+        selected_wbs = [i.text() for i in self.list_wbs.selectedItems()]
+        if not selected_wbs:
+            QMessageBox.warning(self, "提示", "请至少选择一个工作簿")
+            return
+
+        self.txt_result.clear()
+        self.txt_result.appendPlainText(f"正在查询：{person} ... 请稍候\n")
+        QApplication.processEvents()  # 刷新界面
+
+        results = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+
+        try:
+            self.conn.app.ScreenUpdating = False
+            self.conn.app.Calculation = -4135  # 手动计算，提速
+        except Exception:
+            pass
+
+        total_grand = 0
+        model_grand = defaultdict(float)
+
+        for wb_name in selected_wbs:
+            try:
+                wb = self.conn.app.Workbooks(wb_name)
+            except Exception:
+                continue
+
+            for sh in wb.Sheets:
+                try:
+                    sh_name = sh.Name
+                except Exception:
+                    continue
+
+                if sh_name == person:
+                    self._parse_paidan_sheet(sh, wb_name, date_str, results)
+                elif "退打磨" in wb_name:
+                    self._parse_tuimoda_sheet(sh, wb_name, date_str, results)
+                else:
+                    self._parse_generic_sheet(sh, wb_name, person, date_str, results)
+
+        try:
+            self.conn.app.ScreenUpdating = True
+            self.conn.app.Calculation = -4105
+        except Exception:
+            pass
+
+        # 生成报告
+        report_lines = []
+        for wb_name, types_data in results.items():
+            report_lines.append(f"【{wb_name}】")
+            wb_total = 0
+
+            for type_name, models_data in types_data.items():
+                if not models_data:
+                    continue
+                report_lines.append(f"  -- {type_name} --")
+                type_total = 0
+                for model, qty in sorted(models_data.items()):
+                    if qty > 0:
+                        report_lines.append(f"      {model} : {int(qty) if qty.is_integer() else qty}")
+                        type_total += qty
+                        model_grand[model] += qty
+                if type_total > 0:
+                    report_lines.append(f"      小计：{int(type_total) if type_total.is_integer() else type_total}")
+                    wb_total += type_total
+
+            if wb_total > 0:
+                report_lines.append(f"  >> {wb_name} 总计：{int(wb_total) if wb_total.is_integer() else wb_total}\n")
+                total_grand += wb_total
+            else:
+                report_lines.append("  (无符合条件的数据)\n")
+
+        if not results or total_grand == 0:
+            self.txt_result.appendPlainText(f"未找到 {person} 的符合条件的记录。")
+        else:
+            report_lines.append("=" * 30)
+            report_lines.append("【全部型号汇总】")
+            for model, qty in sorted(model_grand.items()):
+                report_lines.append(f"    {model} : {int(qty) if qty.is_integer() else qty}")
+            report_lines.append("=" * 30)
+            report_lines.append(f"总计数量：{int(total_grand) if total_grand.is_integer() else total_grand}")
+
+            self.txt_result.setPlainText("\n".join(report_lines))
+
+    def _parse_paidan_sheet(self, sh, wb_name, date_str, results):
+        try:
+            used = sh.UsedRange
+            last_col = min(used.Column + used.Columns.Count - 1, 200)
+            if last_col < 2: return
+
+            if date_str:
+                # 查特定天，一次性读该天所在行
+                try:
+                    day = int(date_str)
+                except:
+                    return
+                r = day + 2
+                if not (3 <= r <= 33): return
+
+                rng_h = self._read_range(sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col)))[0]
+                rng_v = self._read_range(sh.Range(sh.Cells(34, 2), sh.Cells(34, last_col)))[0]
+                rng_day = self._read_range(sh.Range(sh.Cells(r, 2), sh.Cells(r, last_col)))[0]
+
+                for h, v, d in zip(rng_h, rng_v, rng_day):
+                    if h is not None and d is not None and str(d).strip() != "":
+                        q = float(v) if v is not None else 0
+                        if q == 0:
+                            try:
+                                q = float(d)
+                            except:
+                                q = 1
+                        if q > 0:
+                            results[wb_name]["排单表(按天)"][str(h).strip()] += q
+            else:
+                # 查全周期，直接加总
+                rng_h = self._read_range(sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col)))[0]
+                rng_v = self._read_range(sh.Range(sh.Cells(34, 2), sh.Cells(34, last_col)))[0]
+                for h, v in zip(rng_h, rng_v):
+                    if h is not None and v is not None:
+                        try:
+                            q = float(v)
+                            if q > 0:
+                                results[wb_name]["排单表(全周期)"][str(h).strip()] += q
+                        except:
+                            pass
+        except Exception:
+            pass
+
+    def _parse_tuimoda_sheet(self, sh, wb_name, date_str, results):
+        try:
+            used = sh.UsedRange
+            max_r = used.Row + used.Rows.Count - 1
+            if max_r < 3: return
+
+            # 一次性读取 A列(日期) 到 D列(数量)
+            rng = self._read_range(sh.Range(sh.Cells(3, 1), sh.Cells(max_r, 4)))
+            current_day = None
+            for row in rng:
+                if not row or len(row) < 4: continue
+                a_val = row[0]
+                if a_val is not None and str(a_val).strip() != "":
+                    current_day = str(a_val).strip()
+
+                if date_str and current_day != date_str:
+                    continue
+
+                model = row[2]
+                qty = row[3]
+                if model and qty:
+                    try:
+                        q = float(qty)
+                        results[wb_name]["退打磨"][str(model).strip()] += q
+                    except:
+                        pass
+        except Exception:
+            pass
+
+    def _parse_generic_sheet(self, sh, wb_name, person, date_str, results):
+        try:
+            used = sh.UsedRange
+            max_r = used.Row + used.Rows.Count - 1
+            max_c = used.Column + used.Columns.Count - 1
+            if max_r < 2 or max_c < 2: return
+
+            # 批量读取找表头
+            r_limit = min(10, max_r)
+            c_limit = min(30, max_c)
+            header_data = self._read_range(sh.Range(sh.Cells(1, 1), sh.Cells(r_limit, c_limit)))
+
+            col_person, col_model, col_qty, col_date, header_row = -1, -1, -1, -1, -1
+
+            for r_idx, row in enumerate(header_data):
+                for c_idx, v in enumerate(row):
+                    if v is None: continue
+                    s = str(v).strip()
+                    if "姓名" in s or "人员" in s:
+                        col_person = c_idx + 1;
+                        header_row = r_idx + 1
+                    elif "型号" in s or "产品" in s:
+                        col_model = c_idx + 1;
+                        header_row = r_idx + 1
+                    elif "数量" in s or "产量" in s:
+                        col_qty = c_idx + 1;
+                        header_row = r_idx + 1
+                    elif "日期" in s or "时间" in s:
+                        col_date = c_idx + 1;
+                        header_row = r_idx + 1
+
+            if col_model > 0 and col_qty > 0 and header_row > 0 and col_person > 0:
+                if header_row + 1 <= max_r:
+                    # 一次性读取数据区域
+                    rng = self._read_range(sh.Range(sh.Cells(header_row + 1, 1), sh.Cells(max_r, max_c)))
+                    for row in rng:
+                        if not row or len(row) < max(col_person, col_model, col_qty): continue
+
+                        p_val = row[col_person - 1]
+                        if p_val is None or str(p_val).strip() != person: continue
+
+                        if date_str and col_date > 0:
+                            d_val = row[col_date - 1]
+                            if d_val is None or str(d_val).strip() != date_str: continue
+
+                        model = row[col_model - 1]
+                        qty = row[col_qty - 1]
+                        if model and qty:
+                            try:
+                                q = float(qty)
+                                results[wb_name][f"{sh.Name}"][str(model).strip()] += q
+                            except:
+                                pass
+        except Exception:
+            pass
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -759,6 +1149,22 @@ class MainWindow(QWidget):
 
         self.settings = QSettings("config.ini", QSettings.IniFormat)
 
+        # ---- 状态变量先置空 ----
+        self.conn = None
+        self.price_table = None
+        self.manager = None
+        self._scanned_workbooks = set()
+        self._verified_workbooks = set()
+        self._missing_prices = []
+        self._last_workbook = ""
+        self._last_sheet = ""
+        self._restoring = False
+        self.batch_mode = False
+        self.batch_persons = []
+        self.batch_index = 0
+        self.batch_model = ""
+        self.batch_history = []
+
         try:
             on_top = int(self.settings.value("window_on_top", 1, type=int))
         except Exception:
@@ -766,32 +1172,8 @@ class MainWindow(QWidget):
         if on_top:
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
-        self.conn = WPSConnector()
-        self.conn.connect()
-
-        self.price_table = PriceTable()
-        price_path = self.settings.value("price_file", "", type=str)
-        if price_path:
-            self.price_table.set_path(price_path)
-            self.price_table.load()
-
-        self.manager = EntryManager(self.conn, price_table=self.price_table)
-        self._scanned_workbooks = set()
-        self._verified_workbooks = set()
-        self._missing_prices = []
-
-        self._last_workbook = ""
-        self._last_sheet = ""
-        self._restoring = False
-
-        self.batch_mode = False
-        self.batch_persons = []
-        self.batch_index = 0
-        self.batch_model = ""
-        self.batch_history = []
-
+        # ---- 先建 UI ----
         self.build_ui()
-
         self.chk_top.setChecked(bool(on_top))
 
         try:
@@ -805,15 +1187,35 @@ class MainWindow(QWidget):
         self.slider_opacity.setValue(opacity)
         self._apply_opacity(opacity)
 
+        self.log.setText("正在初始化...")
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.monitor_wps)
+
+        self._batch_jump_timer = QTimer(self)
+        self._batch_jump_timer.setSingleShot(True)
+        self._batch_jump_timer.timeout.connect(self._batch_do_jump)
+
+        QTimer.singleShot(0, self._deferred_init)
+
+    def _deferred_init(self):
+        self.conn = WPSConnector()
+        self.conn.connect()
+
+        self.price_table = PriceTable()
+        price_path = self.settings.value("price_file", "", type=str)
+        if price_path:
+            self.price_table.set_path(price_path)
+            self.price_table.load()
+
+        self.manager = EntryManager(self.conn, price_table=self.price_table)
+
         if self.price_table.loaded:
             self.log.setText(f"单价表已加载（{len(self.price_table.data)} 个型号）")
         else:
             self.log.setText("提示：点击'单价表'按钮选择单价表文件")
 
         self.refresh_sheets()
-
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.monitor_wps)
         self.timer.start(500)
 
         self._batch_jump_timer = QTimer(self)
@@ -920,6 +1322,11 @@ class MainWindow(QWidget):
         btn_query = QPushButton("查询某天记录")
         btn_query.clicked.connect(self.do_query_date)
         btn_layout.addWidget(btn_query)
+
+        btn_global_query = QPushButton("🔍 跨表综合查询")
+        btn_global_query.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        btn_global_query.clicked.connect(self.do_global_query)
+        btn_layout.addWidget(btn_global_query)
 
         btn_container = QWidget()
         btn_container.setLayout(btn_layout)
@@ -1451,6 +1858,8 @@ class MainWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def monitor_wps(self):
+        if self.conn is None:
+            return
         if self._restoring:
             return
         if self.batch_mode:
@@ -1787,30 +2196,28 @@ class MainWindow(QWidget):
         dlg = QueryDateDialog(self.conn, self)
         dlg.exec()
 
-        def closeEvent(self, event):
-            # 停掉所有定时器，避免关闭后还有回调触发
-            try:
-                self.timer.stop()
-            except Exception:
-                pass
-            try:
-                self._batch_jump_timer.stop()
-            except Exception:
-                pass
+    def do_global_query(self):
+        dlg = GlobalQueryDialog(self.conn, self)
+        dlg.exec()
 
-            # 主动断开 WPS COM 引用，避免进程残留
-            try:
-                self.conn.wb = None
-            except Exception:
-                pass
-
-            event.accept()
-
-            # 确保整个进程退出
-            try:
-                QApplication.instance().quit()
-            except Exception:
-                pass
+    def closeEvent(self, event):
+        try:
+            self.timer.stop()
+        except Exception:
+            pass
+        try:
+            self._batch_jump_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.conn.wb = None
+        except Exception:
+            pass
+        event.accept()
+        try:
+            QApplication.instance().quit()
+        except Exception:
+            pass
 
 
 def run():
