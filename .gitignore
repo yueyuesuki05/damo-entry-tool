@@ -27,3 +27,12 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+# 程序运行时生成的本地状态和缓存文件
+aliases.json
+last_date.json
+session_state.json
+helmet_base_backup.json
+
+# 运行日志（如果有的话）
+*.log
+logs/
