@@ -1315,6 +1315,11 @@ class MainWindow(QWidget):
         btn_verify.clicked.connect(self.do_verify_formulas)
         btn_layout.addWidget(btn_verify)
 
+        # --- 检查排版按钮 ---
+        btn_margin = QPushButton("检查排版(边距/横打)")
+        btn_margin.clicked.connect(self.do_check_margins)
+        btn_layout.addWidget(btn_margin)
+
         btn_summary = QPushButton("修帽子合计统计")
         btn_summary.clicked.connect(self.do_make_summary)
         btn_layout.addWidget(btn_summary)
@@ -1736,23 +1741,40 @@ class MainWindow(QWidget):
         if "干磨" not in wb_name:
             QMessageBox.warning(self, "提示", f"当前工作簿不是干磨表：{wb_name}")
             return
-        missing, err = self.manager.find_missing_prices(wb_name)
+
+        missing_info, err = self.manager.find_missing_prices(wb_name)
         if err:
             QMessageBox.warning(self, "检查缺失单价", err)
             return
-        if not missing:
+        if not missing_info:
             QMessageBox.information(self, "检查缺失单价",
                                     "所有型号都能在单价表中找到单价。")
             self.log.setText("检查缺失单价：无缺失")
             return
-        preview = "\n".join(missing[:80])
-        if len(missing) > 80:
-            preview += f"\n…… 共 {len(missing)} 个"
-        msg = f"以下 {len(missing)} 个型号没有单价：\n\n{preview}"
+
+        # 拼接详细报告文本
+        lines = []
+        for model, occurrences in missing_info.items():
+            if occurrences:
+                parts = []
+                for person, days in occurrences.items():
+                    if days:
+                        days_str = ",".join(map(str, days))
+                        parts.append(f"{person}({days_str}号)")
+                    else:
+                        parts.append(f"{person}(仅表头)")
+                lines.append(f"· {model}  →  {'；'.join(parts)}")
+            else:
+                lines.append(f"· {model}  →  未找到是谁填的")
+
+        msg = f"以下 {len(missing_info)} 个型号没有单价：\n\n" + "\n".join(lines)
+
+        # 如果文本太长，截断防止弹窗卡死
         if len(msg) > 4000:
-            msg = msg[:4000] + "\n\n……（内容过多，已截断）"
+            msg = msg[:4000] + "\n\n……（内容过多，已截断，请补齐单价后重新检查）"
+
         QMessageBox.information(self, "检查缺失单价", msg)
-        self.log.setText(f"缺失单价：共 {len(missing)} 个型号")
+        self.log.setText(f"缺失单价：共 {len(missing_info)} 个型号")
 
     # ---------- 公式检查 ----------
     def try_verify_formulas(self):
@@ -1788,6 +1810,14 @@ class MainWindow(QWidget):
             return
         fixes = self.manager.verify_current_workbook()
         if fixes:
+            # --- 新增：强制保存 ---
+            try:
+                wb = self.conn.get_active_workbook()
+                if wb:
+                    wb.Save()
+            except Exception as e:
+                QMessageBox.warning(self, "保存失败", f"公式修正成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+
             preview = "、".join(fixes[:10])
             if len(fixes) > 10:
                 preview += f" 等 {len(fixes)} 处"
@@ -1798,6 +1828,50 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "检查修正公式", "所有公式都符合规范，无需修正。")
             self.log.setText("公式检查完成，无修正")
         self.refresh_sheets()
+
+        def do_check_margins(self):
+            # 先只检查
+            ok, non_compliant, err = self.manager.check_and_fix_margins(fix=False)
+            if not ok:
+                QMessageBox.warning(self, "检查排版", err)
+                return
+
+            if not non_compliant:
+                QMessageBox.information(self, "检查排版",
+                                        "当前工作簿所有 sheet 的排版均符合要求：\n"
+                                        "· 左边距 2cm，其余边距 1cm\n"
+                                        "· 横向打印")
+                self.log.setText("检查排版：全部符合要求")
+                return
+
+            preview = "、".join(non_compliant[:10])
+            if len(non_compliant) > 10:
+                preview += f" 等 {len(non_compliant)} 个"
+
+            reply = QMessageBox.question(
+                self, "检查排版",
+                f"发现以下 {len(non_compliant)} 个 sheet 的排版不符合要求：\n{preview}\n\n"
+                f"是否统一修改为（左边距 2cm，右/上/下边距 1cm）且【横向打印】？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            # 执行修正
+            ok, _, err2 = self.manager.check_and_fix_margins(fix=True)
+            if ok:
+                # 强制保存兜底
+                try:
+                    wb = self.conn.get_active_workbook()
+                    if wb:
+                        wb.Save()
+                except Exception:
+                    pass
+                QMessageBox.information(self, "检查排版", err2)
+                self.log.setText(err2)
+            else:
+                QMessageBox.warning(self, "修正失败", err2)
 
     # ---------- 透明度 ----------
     def on_opacity_changed(self, value):
@@ -2125,6 +2199,16 @@ class MainWindow(QWidget):
             return
 
         ok, msg2 = self.manager.delete_sheets(empty)
+
+        if ok:
+            # --- 新增：强制保存 ---
+            try:
+                wb = self.conn.get_active_workbook()
+                if wb:
+                    wb.Save()
+            except Exception as e:
+                QMessageBox.warning(self, "保存失败", f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+
         self.log.setText(msg2)
         if ok:
             QMessageBox.information(self, "清理离职表", msg2)
@@ -2161,6 +2245,16 @@ class MainWindow(QWidget):
             return
 
         ok, msg2 = self.manager.do_delete_columns_batch(items)
+
+        if ok:
+            # --- 新增：强制保存 ---
+            try:
+                wb = self.conn.get_active_workbook()
+                if wb:
+                    wb.Save()
+            except Exception as e:
+                QMessageBox.warning(self, "保存失败", f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+
         self.log.setText(msg2)
         if not ok:
             QMessageBox.warning(self, "清理空列", msg2)

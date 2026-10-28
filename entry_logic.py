@@ -157,15 +157,16 @@ class EntryManager:
 
     def find_missing_prices(self, wb_name):
         if self.price_table is None or not self.price_table.loaded:
-            return [], "单价表未加载"
+            return {}, "单价表未加载"
         if "干磨" not in wb_name:
-            return [], f"当前工作簿不是干磨表：{wb_name}"
+            return {}, f"当前工作簿不是干磨表：{wb_name}"
 
         wb = self.conn.get_active_workbook()
         if wb is None:
-            return [], "未检测到活动工作簿"
+            return {}, "未检测到活动工作簿"
 
-        missing_set = set()
+        # 结构: { "型号名": { "张三": [1, 2, 5], "李四": [3] } }
+        missing_info = {}
 
         try:
             self.conn.app.ScreenUpdating = False
@@ -206,7 +207,7 @@ class EntryManager:
                 except Exception:
                     continue
 
-                for h in headers:
+                for i, h in enumerate(headers):
                     if h is None:
                         continue
                     name = str(h).strip()
@@ -221,24 +222,47 @@ class EntryManager:
 
                     price = self.price_table.get_price(name)
                     if price is None:
-                        missing_set.add(name)
+                        # 发现缺失单价，开始扫描这列 3~33 行哪天有数据
+                        c = 2 + i
+                        days_found = []
+                        try:
+                            # 一次性读取该列的3-33行，速度快
+                            col_vals = sh.Range(sh.Cells(3, c), sh.Cells(33, c)).Value
+                            if col_vals:
+                                if not isinstance(col_vals, tuple):
+                                    col_vals = ((col_vals,),)
+                                for idx, v in enumerate(col_vals):
+                                    if v is not None and str(v).strip() != "":
+                                        try:
+                                            if abs(float(v)) < 0.0001:
+                                                continue  # 跳过 0
+                                        except (ValueError, TypeError):
+                                            pass
+                                        # 行3对应1号，行4对应2号...
+                                        days_found.append(idx + 1)
+                        except Exception:
+                            pass
+
+                        if name not in missing_info:
+                            missing_info[name] = {}
+                        # 记录是谁，哪天填的
+                        if days_found:
+                            missing_info[name][sh_name] = days_found
+                        else:
+                            # 即使没填数据，只在表头写了，也记录下来
+                            missing_info[name][sh_name] = []
+
         except Exception as e:
-            return [], f"扫描失败：{e}"
+            return {}, f"扫描失败：{e}"
         finally:
             try:
                 self.conn.app.ScreenUpdating = True
-            except Exception:
-                pass
-            try:
                 self.conn.app.Calculation = -4105
-            except Exception:
-                pass
-            try:
                 self.conn.app.EnableEvents = True
             except Exception:
                 pass
 
-        return sorted(missing_set), ""
+        return missing_info, ""
 
     # ---------- 录入 ----------
     def entry(self, sheet_name, day, model, expr):
@@ -1350,3 +1374,76 @@ class EntryManager:
             except Exception:
                 pass
         return True, f"已删除 {deleted} 个 sheet"
+
+    # ---------- 检查与修正页边距及打印方向 ----------
+    def check_and_fix_margins(self, fix=False):
+        wb = self.conn.get_active_workbook()
+        if wb is None:
+            return False, [], "未检测到活动工作簿。"
+
+        # 厘米转磅
+        cm_to_pt = 28.3464567
+        target_left = 2.0 * cm_to_pt  # 左边距 2cm
+        target_right = 1.0 * cm_to_pt  # 右边距 1cm
+        target_top = 1.0 * cm_to_pt  # 上边距 1cm
+        target_bottom = 1.0 * cm_to_pt  # 下边距 1cm
+
+        tolerance = 2.0  # 允许 2 磅的误差（约 0.07 厘米）
+        target_orientation = 2  # 2 代表横向 (xlLandscape)
+
+        non_compliant = []
+
+        try:
+            self.conn.app.ScreenUpdating = False
+        except Exception:
+            pass
+
+        try:
+            for sh in wb.Sheets:
+                try:
+                    sname = sh.Name
+                    ps = sh.PageSetup
+
+                    # 读取当前边距和方向
+                    l = ps.LeftMargin
+                    r = ps.RightMargin
+                    t = ps.TopMargin
+                    b = ps.BottomMargin
+                    orient = ps.Orientation
+
+                    is_invalid = False
+                    # 检查边距
+                    if (abs(l - target_left) > tolerance or
+                            abs(r - target_right) > tolerance or
+                            abs(t - target_top) > tolerance or
+                            abs(b - target_bottom) > tolerance):
+                        is_invalid = True
+
+                    # 检查方向
+                    if orient != target_orientation:
+                        is_invalid = True
+
+                    if is_invalid:
+                        non_compliant.append(sname)
+
+                        # 如果要求修复，直接写入新边距和方向
+                        if fix:
+                            ps.LeftMargin = target_left
+                            ps.RightMargin = target_right
+                            ps.TopMargin = target_top
+                            ps.BottomMargin = target_bottom
+                            ps.Orientation = target_orientation
+                except Exception as e:
+                    print(f"处理 {sname} 页边距/方向失败: {e}")
+                    continue
+        finally:
+            try:
+                self.conn.app.ScreenUpdating = True
+            except Exception:
+                pass
+
+        if fix and non_compliant:
+            self._safe_save(wb)
+            return True, non_compliant, f"已统一修正 {len(non_compliant)} 个 sheet 的页边距和打印方向。"
+
+        return True, non_compliant, ""
