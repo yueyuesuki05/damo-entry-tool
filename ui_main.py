@@ -1279,7 +1279,7 @@ class MainWindow(QWidget):
         btn_undo.clicked.connect(self.do_undo)
         btn_layout.addWidget(btn_undo)
 
-        btn_redo = QPushButton("重做")  # <--- 新增
+        btn_redo = QPushButton("回退")  # <--- 新增
         btn_redo.clicked.connect(self.do_redo)  # <--- 新增
         btn_layout.addWidget(btn_redo)  # <--- 新增
 
@@ -2222,11 +2222,12 @@ class MainWindow(QWidget):
             action_desc = f"【重新写入】：{sheet_name} 表的 {col_letter}{row} 单元格，将改回“{new_val}”"
 
         reply = QMessageBox.question(
-            self, "重做确认",
-            f"即将重做以下操作，是否继续？\n\n{action_desc}",
+            self, "回退确认",
+            f"即将回退以下操作，是否继续？\n\n{action_desc}",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes
         )
+
         if reply != QMessageBox.Yes:
             return
 
