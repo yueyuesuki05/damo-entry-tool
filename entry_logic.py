@@ -13,10 +13,12 @@ from model_sort import (
 
 
 class EntryManager:
+
     def __init__(self, connector, price_table=None):
         self.conn = connector
         self.price_table = price_table
         self.undo_stack = []
+        self.redo_stack = []  # <--- 新增：重做栈
 
     def _is_ganmo(self, wb_name):
         return "干磨" in wb_name
@@ -34,14 +36,16 @@ class EntryManager:
         except Exception:
             return None
 
-    def _record_undo(self, wb_name, sheet_name, row, col, old_value, inserted):
+    def _record_undo(self, wb_name, sheet_name, row, col, old_value, inserted, new_value=None, extra=None):
         self.undo_stack.append({
             "wb_name": wb_name,
             "sheet_name": sheet_name,
             "row": row,
             "col": col,
             "old_value": old_value,
+            "new_value": new_value,
             "inserted": inserted,
+            "extra": extra or {},
         })
 
     def _col_letter(self, col):
@@ -380,7 +384,14 @@ class EntryManager:
                 price_msg = ""
 
         self._update_total(sh, wb_name)
-        self._record_undo(wb_name, sheet_name, row, col, old_value, inserted)
+        current_new_val = old_num + qty if old_num != 0 else qty
+
+        # 如果是插入新列，记录下表头名字用于重做
+        extra_info = {"display_name": model_norm} if inserted else {}
+
+        self._record_undo(wb_name, sheet_name, row, col, old_value, inserted, new_value=current_new_val,
+                          extra=extra_info)
+        self.redo_stack.clear()  # <--- 新增了录入操作，历史分支断开，清空重做栈
 
         self._safe_save(wb)
 
@@ -465,35 +476,74 @@ class EntryManager:
     def undo(self):
         if not self.undo_stack:
             return False, "没有可撤回的操作。"
+
+        # 预览提示逻辑在 UI 层做，这里直接执行
         item = self.undo_stack.pop()
         wb = self.conn.get_active_workbook()
         if wb is None:
             return False, "未检测到活动工作簿。"
-        sh = wb.Sheets(item["sheet_name"])
-        if item["inserted"]:
-            sh.Columns(item["col"]).Delete()
-        else:
-            sh.Cells(item["row"], item["col"]).Value = item["old_value"]
-        self._update_total(sh, wb.Name)
-        self._safe_save(wb)
-        return True, "已撤回上一步操作。"
 
-    def multi_entry(self, sheet_names, day, model, total):
-        if not sheet_names:
-            return False, "没有选择人员。"
-        n = len(sheet_names)
         try:
-            total_num = float(total)
-        except ValueError:
-            return False, "总数不合法。"
-        if total_num % n != 0:
-            return False, f"总数 {total_num} 不能被 {n} 整除。"
-        each = total_num / n
-        results = []
-        for name in sheet_names:
-            ok, msg = self.entry(name, day, model, str(each))
-            results.append(f"{name}: {'成功' if ok else '失败：' + msg}")
-        return True, "\n".join(results)
+            sh = wb.Sheets(item["sheet_name"])
+            if item["inserted"]:
+                sh.Columns(item["col"]).Delete()
+            else:
+                sh.Cells(item["row"], item["col"]).Value = item["old_value"]
+
+            self._update_total(sh, wb.Name)
+            self._safe_save(wb)
+
+            # 压入重做栈
+            self.redo_stack.append(item)
+            return True, "已撤回上一步操作。"
+        except Exception as e:
+            # 如果出错，把记录还回去
+            self.undo_stack.append(item)
+            return False, f"撤回失败：{e}"
+
+    def redo(self):
+        if not self.redo_stack:
+            return False, "没有可重做的操作。"
+
+        item = self.redo_stack.pop()
+        wb = self.conn.get_active_workbook()
+        if wb is None:
+            return False, "未检测到活动工作簿。"
+
+        try:
+            sh = wb.Sheets(item["sheet_name"])
+            if item["inserted"]:
+                # 重新插入列
+                ok = self.conn.insert_column(sh, item["col"])
+                if not ok:
+                    self.redo_stack.append(item)
+                    return False, "WPS拒绝插入列，重做失败。"
+
+                # 恢复表头和公式
+                display_name = item.get("extra", {}).get("display_name", "")
+                if display_name:
+                    self.conn.set_header_text_format(sh, item["col"])
+                    sh.Cells(2, item["col"]).Value = display_name
+
+                    col_letter = self._col_letter(item["col"])
+                    self.conn.write_formula(sh, 34, item["col"], f"=SUM({col_letter}3:{col_letter}33)")
+                    if self._is_ganmo(wb.Name) and display_name not in ("时间", "样品"):
+                        self.conn.write_formula(sh, 36, item["col"], f"={col_letter}34*{col_letter}35")
+
+                # 恢复数据
+                sh.Cells(item["row"], item["col"]).Value = item["new_value"]
+            else:
+                sh.Cells(item["row"], item["col"]).Value = item["new_value"]
+
+            self._update_total(sh, wb.Name)
+            self._safe_save(wb)
+
+            # 压回撤回栈
+            self.undo_stack.append(item)
+            return True, f"已重做录入操作。"
+        except Exception as e:
+            self.redo_stack.append(item)
+            return False, f"重做失败：{e}"
 
     def add_person(self, name):
         wb = self.conn.get_active_workbook()

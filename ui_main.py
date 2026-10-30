@@ -1279,6 +1279,10 @@ class MainWindow(QWidget):
         btn_undo.clicked.connect(self.do_undo)
         btn_layout.addWidget(btn_undo)
 
+        btn_redo = QPushButton("重做")  # <--- 新增
+        btn_redo.clicked.connect(self.do_redo)  # <--- 新增
+        btn_layout.addWidget(btn_redo)  # <--- 新增
+
         btn_multi = QPushButton("多人合作")
         btn_multi.clicked.connect(self.do_multi)
         btn_layout.addWidget(btn_multi)
@@ -1829,49 +1833,49 @@ class MainWindow(QWidget):
             self.log.setText("公式检查完成，无修正")
         self.refresh_sheets()
 
-        def do_check_margins(self):
-            # 先只检查
-            ok, non_compliant, err = self.manager.check_and_fix_margins(fix=False)
-            if not ok:
-                QMessageBox.warning(self, "检查排版", err)
-                return
+    def do_check_margins(self):
+        # 先只检查
+        ok, non_compliant, err = self.manager.check_and_fix_margins(fix=False)
+        if not ok:
+            QMessageBox.warning(self, "检查排版", err)
+            return
 
-            if not non_compliant:
-                QMessageBox.information(self, "检查排版",
-                                        "当前工作簿所有 sheet 的排版均符合要求：\n"
-                                        "· 左边距 2cm，其余边距 1cm\n"
-                                        "· 横向打印")
-                self.log.setText("检查排版：全部符合要求")
-                return
+        if not non_compliant:
+            QMessageBox.information(self, "检查排版",
+                                    "当前工作簿所有 sheet 的排版均符合要求：\n"
+                                    "· 左边距 2cm，其余边距 1cm\n"
+                                    "· 横向打印")
+            self.log.setText("检查排版：全部符合要求")
+            return
 
-            preview = "、".join(non_compliant[:10])
-            if len(non_compliant) > 10:
-                preview += f" 等 {len(non_compliant)} 个"
+        preview = "、".join(non_compliant[:10])
+        if len(non_compliant) > 10:
+            preview += f" 等 {len(non_compliant)} 个"
 
-            reply = QMessageBox.question(
-                self, "检查排版",
-                f"发现以下 {len(non_compliant)} 个 sheet 的排版不符合要求：\n{preview}\n\n"
-                f"是否统一修改为（左边距 2cm，右/上/下边距 1cm）且【横向打印】？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            if reply != QMessageBox.Yes:
-                return
+        reply = QMessageBox.question(
+            self, "检查排版",
+            f"发现以下 {len(non_compliant)} 个 sheet 的排版不符合要求：\n{preview}\n\n"
+            f"是否统一修改为（左边距 2cm，右/上/下边距 1cm）且【横向打印】？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
 
-            # 执行修正
-            ok, _, err2 = self.manager.check_and_fix_margins(fix=True)
-            if ok:
-                # 强制保存兜底
-                try:
-                    wb = self.conn.get_active_workbook()
-                    if wb:
-                        wb.Save()
-                except Exception:
-                    pass
-                QMessageBox.information(self, "检查排版", err2)
-                self.log.setText(err2)
-            else:
-                QMessageBox.warning(self, "修正失败", err2)
+        # 执行修正
+        ok, _, err2 = self.manager.check_and_fix_margins(fix=True)
+        if ok:
+            # 强制保存兜底
+            try:
+                wb = self.conn.get_active_workbook()
+                if wb:
+                    wb.Save()
+            except Exception:
+                pass
+            QMessageBox.information(self, "检查排版", err2)
+            self.log.setText(err2)
+        else:
+            QMessageBox.warning(self, "修正失败", err2)
 
     # ---------- 透明度 ----------
     def on_opacity_changed(self, value):
@@ -2138,14 +2142,98 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "录入失败", msg)
 
     def do_undo(self):
+        # 批量模式特殊处理
         if self.batch_mode and self.batch_history:
             self.do_batch_undo()
+            return
+
+        # --- 撤回前预览 ---
+        if not self.manager.undo_stack:
+            QMessageBox.information(self, "撤回", "没有可撤回的操作。")
+            return
+
+        # 获取栈顶元素用于预览
+        item = self.manager.undo_stack[-1]
+        sheet_name = item["sheet_name"]
+        row = item["row"]
+        col = item["col"]
+
+        # 将列号转为字母（如 2 -> B）
+        def _col_letter(c):
+            res = ""
+            while c > 0:
+                c, rem = divmod(c - 1, 26)
+                res = chr(65 + rem) + res
+            return res
+
+        col_letter = _col_letter(col)
+
+        if item["inserted"]:
+            action_desc = f"【新插入列】：{sheet_name} 表的 {col_letter} 列"
+        else:
+            old_val = item["old_value"] if item["old_value"] is not None else "空"
+            new_val = item.get("new_value") if item.get("new_value") is not None else "空"
+            action_desc = f"【数据修改】：{sheet_name} 表的 {col_letter}{row} 单元格，将“{new_val}”恢复为“{old_val}”"
+
+        reply = QMessageBox.question(
+            self, "撤回确认",
+            f"即将撤回以下操作，是否继续？\n\n{action_desc}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
             return
 
         ok, msg = self.manager.undo()
         self.log.setText(msg)
         if not ok:
-            QMessageBox.information(self, "撤回", msg)
+            QMessageBox.warning(self, "撤回失败", msg)
+        else:
+            self.refresh_sheets()
+
+    def do_redo(self):
+        if self.batch_mode:
+            QMessageBox.warning(self, "提示", "批量录入模式下暂不支持重做。")
+            return
+
+        if not self.manager.redo_stack:
+            QMessageBox.information(self, "重做", "没有可重做的操作。")
+            return
+
+        # 获取栈顶元素用于预览
+        item = self.manager.redo_stack[-1]
+        sheet_name = item["sheet_name"]
+        row = item["row"]
+        col = item["col"]
+
+        def _col_letter(c):
+            res = ""
+            while c > 0:
+                c, rem = divmod(c - 1, 26)
+                res = chr(65 + rem) + res
+            return res
+
+        col_letter = _col_letter(col)
+
+        if item["inserted"]:
+            action_desc = f"【重新插入列】：{sheet_name} 表的 {col_letter} 列"
+        else:
+            new_val = item.get("new_value") if item.get("new_value") is not None else "空"
+            action_desc = f"【重新写入】：{sheet_name} 表的 {col_letter}{row} 单元格，将改回“{new_val}”"
+
+        reply = QMessageBox.question(
+            self, "重做确认",
+            f"即将重做以下操作，是否继续？\n\n{action_desc}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        ok, msg = self.manager.redo()
+        self.log.setText(msg)
+        if not ok:
+            QMessageBox.warning(self, "重做失败", msg)
         else:
             self.refresh_sheets()
 
