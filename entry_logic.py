@@ -2,10 +2,8 @@
 # @Author   : 小野
 # @File     : entry_logic.py 录入、撤回、批量、汇总
 # @Time     : 2026/9/30 13:18
-# @Version : 4.8
-# @Author  : 小野
-# @File    : entry_logic.py
 
+import re
 from model_sort import (
     normalize_model, model_sort_key, find_insert_position,
     to_chinese_suffix
@@ -13,12 +11,11 @@ from model_sort import (
 
 
 class EntryManager:
-
     def __init__(self, connector, price_table=None):
         self.conn = connector
         self.price_table = price_table
         self.undo_stack = []
-        self.redo_stack = []  # <--- 新增：重做栈
+        self.redo_stack = []  # 重做栈
 
     def _is_ganmo(self, wb_name):
         return "干磨" in wb_name
@@ -169,7 +166,6 @@ class EntryManager:
         if wb is None:
             return {}, "未检测到活动工作簿"
 
-        # 结构: { "型号名": { "张三": [1, 2, 5], "李四": [3] } }
         missing_info = {}
 
         try:
@@ -226,11 +222,9 @@ class EntryManager:
 
                     price = self.price_table.get_price(name)
                     if price is None:
-                        # 发现缺失单价，开始扫描这列 3~33 行哪天有数据
                         c = 2 + i
                         days_found = []
                         try:
-                            # 一次性读取该列的3-33行，速度快
                             col_vals = sh.Range(sh.Cells(3, c), sh.Cells(33, c)).Value
                             if col_vals:
                                 if not isinstance(col_vals, tuple):
@@ -239,21 +233,18 @@ class EntryManager:
                                     if v is not None and str(v).strip() != "":
                                         try:
                                             if abs(float(v)) < 0.0001:
-                                                continue  # 跳过 0
+                                                continue
                                         except (ValueError, TypeError):
                                             pass
-                                        # 行3对应1号，行4对应2号...
                                         days_found.append(idx + 1)
                         except Exception:
                             pass
 
                         if name not in missing_info:
                             missing_info[name] = {}
-                        # 记录是谁，哪天填的
                         if days_found:
                             missing_info[name][sh_name] = days_found
                         else:
-                            # 即使没填数据，只在表头写了，也记录下来
                             missing_info[name][sh_name] = []
 
         except Exception as e:
@@ -312,86 +303,98 @@ class EntryManager:
         col = self.conn.find_model_column(sh, model_norm)
         inserted = False
 
-        if col == 0:
-            display_name = to_chinese_suffix(model_norm)
-            is_time = (display_name == "时间")
-            is_sample = (display_name == "样品")
+        # === 优化：插入列和写入期间关闭刷新，提速并防止画面闪烁 ===
+        try:
+            self.conn.app.ScreenUpdating = False
+        except Exception:
+            pass
 
-            last_col = self.conn.scan_last_model_col(sh)
-            existing = []
+        try:
+            if col == 0:
+                display_name = to_chinese_suffix(model_norm)
+                is_time = (display_name == "时间")
+                is_sample = (display_name == "样品")
+
+                last_col = self.conn.scan_last_model_col(sh)
+                existing = []
+                try:
+                    rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+                    vals = rng.Value
+                    if isinstance(vals, tuple):
+                        row_vals = vals[0]
+                    else:
+                        row_vals = (vals,)
+                    for v in row_vals:
+                        if v is not None:
+                            existing.append(str(v))
+                except Exception:
+                    pass
+
+                time_col = None
+                if existing and existing[-1] == "时间":
+                    time_col = last_col
+                insert_end = (time_col - 1) if time_col else last_col
+                pos = find_insert_position(existing[:insert_end - 1], display_name)
+                insert_col = 2 + pos
+                if time_col and insert_col > time_col - 1:
+                    insert_col = time_col
+
+                ok = self.conn.insert_column(sh, insert_col)
+                if not ok:
+                    return False, (
+                        "WPS 拒绝插入新列。请在该 sheet 中按 Ctrl+End，"
+                        "看是否跳到了很远的单元格；如果是，删除该整行/整列，"
+                        "保存并重新打开 WPS，然后再录入。"
+                    )
+                self.conn.set_header_text_format(sh, insert_col)
+                sh.Cells(2, insert_col).Value = display_name
+
+                col_letter = self._col_letter(insert_col)
+
+                self.conn.write_formula(sh, 34, insert_col,
+                                        f"=SUM({col_letter}3:{col_letter}33)")
+
+                if self._is_ganmo(wb_name) and not is_time and not is_sample:
+                    self.conn.write_formula(sh, 36, insert_col,
+                                            f"={col_letter}34*{col_letter}35")
+
+                col = insert_col
+                inserted = True
+                model_norm = display_name
+
+            old_value = self.conn.read_cell(sh, row, col)
+            if old_value is None:
+                old_value = 0
             try:
-                rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
-                vals = rng.Value
-                if isinstance(vals, tuple):
-                    row_vals = vals[0]
-                else:
-                    row_vals = (vals,)
-                for v in row_vals:
-                    if v is not None:
-                        existing.append(str(v))
+                old_num = float(old_value)
+            except (ValueError, TypeError):
+                old_num = 0
+
+            if old_num != 0:
+                self.conn.write_cell(sh, row, col, old_num + qty)
+            else:
+                self.conn.write_cell(sh, row, col, qty)
+
+            price_msg = ""
+            if self._is_ganmo(wb_name):
+                ok_price, price_msg = self._fill_price_for_col(sh, col, model_norm)
+                if not ok_price and not price_msg:
+                    price_msg = ""
+
+            self._update_total(sh, wb_name)
+            current_new_val = old_num + qty if old_num != 0 else qty
+
+            extra_info = {"display_name": model_norm} if inserted else {}
+
+            self._record_undo(wb_name, sheet_name, row, col, old_value, inserted, new_value=current_new_val,
+                              extra=extra_info)
+            self.redo_stack.clear()
+        finally:
+            # === 恢复屏幕刷新 ===
+            try:
+                self.conn.app.ScreenUpdating = True
             except Exception:
                 pass
-
-            time_col = None
-            if existing and existing[-1] == "时间":
-                time_col = last_col
-            insert_end = (time_col - 1) if time_col else last_col
-            pos = find_insert_position(existing[:insert_end - 1], display_name)
-            insert_col = 2 + pos
-            if time_col and insert_col > time_col - 1:
-                insert_col = time_col
-
-            ok = self.conn.insert_column(sh, insert_col)
-            if not ok:
-                return False, (
-                    "WPS 拒绝插入新列。请在该 sheet 中按 Ctrl+End，"
-                    "看是否跳到了很远的单元格；如果是，删除该整行/整列，"
-                    "保存并重新打开 WPS，然后再录入。"
-                )
-            self.conn.set_header_text_format(sh, insert_col)
-            sh.Cells(2, insert_col).Value = display_name
-
-            col_letter = self._col_letter(insert_col)
-
-            self.conn.write_formula(sh, 34, insert_col,
-                                    f"=SUM({col_letter}3:{col_letter}33)")
-
-            if self._is_ganmo(wb_name) and not is_time and not is_sample:
-                self.conn.write_formula(sh, 36, insert_col,
-                                        f"={col_letter}34*{col_letter}35")
-
-            col = insert_col
-            inserted = True
-            model_norm = display_name
-
-        old_value = self.conn.read_cell(sh, row, col)
-        if old_value is None:
-            old_value = 0
-        try:
-            old_num = float(old_value)
-        except (ValueError, TypeError):
-            old_num = 0
-
-        if old_num != 0:
-            self.conn.write_cell(sh, row, col, old_num + qty)
-        else:
-            self.conn.write_cell(sh, row, col, qty)
-
-        price_msg = ""
-        if self._is_ganmo(wb_name):
-            ok_price, price_msg = self._fill_price_for_col(sh, col, model_norm)
-            if not ok_price and not price_msg:
-                price_msg = ""
-
-        self._update_total(sh, wb_name)
-        current_new_val = old_num + qty if old_num != 0 else qty
-
-        # 如果是插入新列，记录下表头名字用于重做
-        extra_info = {"display_name": model_norm} if inserted else {}
-
-        self._record_undo(wb_name, sheet_name, row, col, old_value, inserted, new_value=current_new_val,
-                          extra=extra_info)
-        self.redo_stack.clear()  # <--- 新增了录入操作，历史分支断开，清空重做栈
 
         self._safe_save(wb)
 
@@ -477,7 +480,6 @@ class EntryManager:
         if not self.undo_stack:
             return False, "没有可撤回的操作。"
 
-        # 预览提示逻辑在 UI 层做，这里直接执行
         item = self.undo_stack.pop()
         wb = self.conn.get_active_workbook()
         if wb is None:
@@ -493,11 +495,9 @@ class EntryManager:
             self._update_total(sh, wb.Name)
             self._safe_save(wb)
 
-            # 压入重做栈
             self.redo_stack.append(item)
             return True, "已撤回上一步操作。"
         except Exception as e:
-            # 如果出错，把记录还回去
             self.undo_stack.append(item)
             return False, f"撤回失败：{e}"
 
@@ -513,13 +513,11 @@ class EntryManager:
         try:
             sh = wb.Sheets(item["sheet_name"])
             if item["inserted"]:
-                # 重新插入列
                 ok = self.conn.insert_column(sh, item["col"])
                 if not ok:
                     self.redo_stack.append(item)
                     return False, "WPS拒绝插入列，重做失败。"
 
-                # 恢复表头和公式
                 display_name = item.get("extra", {}).get("display_name", "")
                 if display_name:
                     self.conn.set_header_text_format(sh, item["col"])
@@ -530,7 +528,6 @@ class EntryManager:
                     if self._is_ganmo(wb.Name) and display_name not in ("时间", "样品"):
                         self.conn.write_formula(sh, 36, item["col"], f"={col_letter}34*{col_letter}35")
 
-                # 恢复数据
                 sh.Cells(item["row"], item["col"]).Value = item["new_value"]
             else:
                 sh.Cells(item["row"], item["col"]).Value = item["new_value"]
@@ -538,12 +535,131 @@ class EntryManager:
             self._update_total(sh, wb.Name)
             self._safe_save(wb)
 
-            # 压回撤回栈
             self.undo_stack.append(item)
             return True, f"已重做录入操作。"
         except Exception as e:
             self.redo_stack.append(item)
             return False, f"重做失败：{e}"
+
+    def clear_day_data(self, sheet_names, day):
+        """清空指定人员、指定日期的所有工序数据"""
+        wb = self.conn.get_active_workbook()
+        if wb is None:
+            return False, "未检测到活动工作簿。"
+
+        try:
+            day_int = int(day)
+            if day_int < 1 or day_int > 31:
+                raise ValueError
+        except Exception:
+            return False, "日期必须是 1-31 的整数。"
+
+        row = day_int + 2
+        cleared_count = 0
+
+        try:
+            self.conn.app.ScreenUpdating = False
+        except Exception:
+            pass
+
+        try:
+            for sname in sheet_names:
+                sh = self.conn.get_sheet(sname)
+                if sh is None:
+                    continue
+
+                try:
+                    rng = sh.Range(sh.Cells(row, 5), sh.Cells(row, 12))
+                    has_data = False
+                    vals = rng.Value
+                    if vals:
+                        if not isinstance(vals, tuple):
+                            vals = ((vals,),)
+                        for r_val in vals:
+                            if not isinstance(r_val, tuple):
+                                r_val = (r_val,)
+                            for v in r_val:
+                                if v is not None and str(v).strip() != "" and str(v) != "0":
+                                    has_data = True
+                                    break
+                            if has_data:
+                                break
+
+                    if has_data:
+                        rng.ClearContents()
+                        self._update_total(sh, wb.Name)
+                        cleared_count += 1
+                except Exception as e:
+                    print(f"清空 {sname} 失败: {e}")
+
+            if cleared_count > 0:
+                self._safe_save(wb)
+            return True, f"已成功清空 {cleared_count} 个人员 {day} 号的数据。"
+        finally:
+            try:
+                self.conn.app.ScreenUpdating = True
+            except Exception:
+                pass
+
+    def replace_model_name(self, old_model, new_model):
+        """批量替换工作簿中所有 Sheet 的第2行型号名（强制大写）"""
+        wb = self.conn.get_active_workbook()
+        if wb is None:
+            return False, "未检测到活动工作簿。"
+
+        old_model = str(old_model).strip().upper()
+        new_model = str(new_model).strip().upper()
+        if not old_model or not new_model:
+            return False, "型号不能为空。"
+
+        replaced_count = 0
+
+        try:
+            self.conn.app.ScreenUpdating = False
+        except Exception:
+            pass
+
+        try:
+            for sh in wb.Sheets:
+                try:
+                    sname = sh.Name
+                    if sname == "合计":
+                        continue
+
+                    last_col = self.conn.scan_last_model_col(sh)
+                    if last_col < 2:
+                        continue
+
+                    rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+                    headers = rng.Value
+                    if not headers:
+                        continue
+                    if not isinstance(headers, tuple):
+                        headers = ((headers,),)
+
+                    row_vals = headers[0]
+                    for i, h in enumerate(row_vals):
+                        if h is None:
+                            continue
+                        h_str = str(h).strip()
+                        h_upper = h_str.upper()
+
+                        if h_upper == old_model or (len(old_model) > 1 and old_model in h_upper):
+                            col_idx = 2 + i
+                            new_val = re.sub(re.escape(old_model), new_model, h_str, flags=re.IGNORECASE)
+                            sh.Cells(2, col_idx).Value = new_val
+                            replaced_count += 1
+                except Exception as e:
+                    print(f"替换 {sname} 失败: {e}")
+
+            if replaced_count > 0:
+                self._safe_save(wb)
+            return True, f"共替换了 {replaced_count} 处表头型号（已转为大写）。"
+        finally:
+            try:
+                self.conn.app.ScreenUpdating = True
+            except Exception:
+                pass
 
     def add_person(self, name):
         wb = self.conn.get_active_workbook()
@@ -1431,15 +1547,14 @@ class EntryManager:
         if wb is None:
             return False, [], "未检测到活动工作簿。"
 
-        # 厘米转磅
         cm_to_pt = 28.3464567
-        target_left = 2.0 * cm_to_pt  # 左边距 2cm
-        target_right = 1.0 * cm_to_pt  # 右边距 1cm
-        target_top = 1.0 * cm_to_pt  # 上边距 1cm
-        target_bottom = 1.0 * cm_to_pt  # 下边距 1cm
+        target_left = 2.0 * cm_to_pt
+        target_right = 1.0 * cm_to_pt
+        target_top = 1.0 * cm_to_pt
+        target_bottom = 1.0 * cm_to_pt
 
-        tolerance = 2.0  # 允许 2 磅的误差（约 0.07 厘米）
-        target_orientation = 2  # 2 代表横向 (xlLandscape)
+        tolerance = 2.0
+        target_orientation = 2
 
         non_compliant = []
 
@@ -1454,7 +1569,6 @@ class EntryManager:
                     sname = sh.Name
                     ps = sh.PageSetup
 
-                    # 读取当前边距和方向
                     l = ps.LeftMargin
                     r = ps.RightMargin
                     t = ps.TopMargin
@@ -1462,21 +1576,18 @@ class EntryManager:
                     orient = ps.Orientation
 
                     is_invalid = False
-                    # 检查边距
                     if (abs(l - target_left) > tolerance or
                             abs(r - target_right) > tolerance or
                             abs(t - target_top) > tolerance or
                             abs(b - target_bottom) > tolerance):
                         is_invalid = True
 
-                    # 检查方向
                     if orient != target_orientation:
                         is_invalid = True
 
                     if is_invalid:
                         non_compliant.append(sname)
 
-                        # 如果要求修复，直接写入新边距和方向
                         if fix:
                             ps.LeftMargin = target_left
                             ps.RightMargin = target_right
