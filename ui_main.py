@@ -1809,38 +1809,73 @@ class MainWindow(QWidget):
             self.log.setText("公式检查完成，无修正")
 
     def do_verify_formulas(self):
-        wb_name = self.conn.get_workbook_name()
-        if not wb_name:
-            QMessageBox.warning(self, "提示", "未检测到活动工作簿。")
+        # 1. 获取当前所有打开的 WPS 工作簿
+        if self.conn.app is None:
+            QMessageBox.warning(self, "提示", "未连接到 WPS，请先打开需要检查的表格。")
             return
-        self._verified_workbooks.discard(wb_name)
+
+        try:
+            all_wbs = [wb for wb in self.conn.app.Workbooks]
+        except Exception as e:
+            QMessageBox.warning(self, "提示", f"获取已打开工作簿失败：{e}")
+            return
+
+        # 2. 过滤出我们需要检查的表格（只检查干磨、修帽子相关的表）
+        target_wbs = []
+        wb_names = []
+        for wb in all_wbs:
+            name = wb.Name
+            if "干磨" in name or "修帽子" in name:
+                target_wbs.append(wb)
+                wb_names.append(name)
+
+        if not target_wbs:
+            QMessageBox.information(self, "提示", "当前没有打开任何需要检查的工作簿（名称包含'干磨'或'修帽子'）。")
+            return
+
+        # 3. 确认提示
+        preview = "、\n".join(wb_names[:5])
+        if len(wb_names) > 5:
+            preview += f" 等 {len(wb_names)} 个文件"
+
         reply = QMessageBox.question(
             self,
-            "检查修正公式",
-            f"将检查并修正「{wb_name}」所有 sheet 的公式，是否继续？",
+            "批量检查修正公式",
+            f"即将检查以下 {len(target_wbs)} 个工作簿的所有 sheet 公式：\n\n{preview}\n\n是否继续？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes
         )
         if reply != QMessageBox.Yes:
             return
-        fixes = self.manager.verify_current_workbook()
-        if fixes:
-            try:
-                wb = self.conn.get_active_workbook()
-                if wb:
-                    wb.Save()
-            except Exception as e:
-                QMessageBox.warning(self, "保存失败", f"公式修正成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
 
-            preview = "、".join(fixes[:10])
-            if len(fixes) > 10:
-                preview += f" 等 {len(fixes)} 处"
-            QMessageBox.information(self, "检查修正公式",
-                                    f"已修正 {len(fixes)} 处：\n{preview}")
-            self.log.setText(f"已修正公式：{preview}")
+        # 4. 遍历每个工作簿进行检查
+        total_fixes = []
+        for wb in target_wbs:
+            try:
+                fixes = self.manager.verify_workbook(wb)
+                if fixes:
+                    for f in fixes:
+                        total_fixes.append(f"[{wb.Name}] {f}")
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"检查工作簿 {wb.Name} 时出错：{e}")
+
+        # 5. 显示最终结果
+        if total_fixes:
+            preview = "\n".join(total_fixes[:15])
+            if len(total_fixes) > 15:
+                preview += f"\n... 等共 {len(total_fixes)} 处"
+
+            QMessageBox.information(
+                self,
+                "检查修正完成",
+                f"全部检查完成，共修正 {len(total_fixes)} 处公式：\n\n{preview}"
+            )
+            self.log.setText(f"已修正 {len(target_wbs)} 个文件的公式，共计 {len(total_fixes)} 处")
         else:
-            QMessageBox.information(self, "检查修正公式", "所有公式都符合规范，无需修正。")
-            self.log.setText("公式检查完成，无修正")
+            QMessageBox.information(self, "检查修正完成", "检查完毕，所有公式均符合规范，无需修正。")
+            self.log.setText(f"已检查 {len(target_wbs)} 个文件，无修正")
+
+        # 刷新一下当前界面的缓存
         self.refresh_sheets()
 
     def do_check_margins(self):

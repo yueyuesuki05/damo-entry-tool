@@ -1370,8 +1370,8 @@ class EntryManager:
 
         return fixes
 
-    def verify_current_workbook(self):
-        wb = self.conn.get_active_workbook()
+    def verify_workbook(self, wb):
+        """检查并修复指定的单个工作簿"""
         if wb is None:
             return []
 
@@ -1422,6 +1422,11 @@ class EntryManager:
                 pass
 
         return all_fixes
+
+    def verify_current_workbook(self):
+        """（保留原方法以防万一）检查并修复当前激活的工作簿"""
+        wb = self.conn.get_active_workbook()
+        return self.verify_workbook(wb)
 
     # ---------- 清理离职表 ----------
     def find_empty_sheets(self):
