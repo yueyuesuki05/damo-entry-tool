@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QMessageBox, QListWidget,
     QListWidgetItem, QDialog, QInputDialog, QSlider, QFileDialog,
-    QCheckBox, QLayout, QPlainTextEdit, QSpinBox, QCompleter, QFormLayout, QDialogButtonBox
+    QCheckBox, QLayout, QPlainTextEdit, QCompleter, QFormLayout, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, QSettings, QTimer, QEvent, Signal, QElapsedTimer, QRect, QSize, QPoint
 
@@ -203,7 +203,6 @@ class MultiDialog(QDialog):
         self.txt_model.installEventFilter(self)
         self.txt_total.installEventFilter(self)
 
-        # 实时清除错误提示
         self.txt_model.textChanged.connect(lambda: self.lbl_status.clear())
         self.txt_total.textChanged.connect(lambda: self.lbl_status.clear())
 
@@ -287,7 +286,6 @@ class MultiDialog(QDialog):
             self.lbl_status.setText("未填写完整：" + "、".join(missing))
             return
 
-        # 锁定界面防抖
         self.btn_entry.setEnabled(False)
         self.txt_model.setEnabled(False)
         self.txt_total.setEnabled(False)
@@ -317,7 +315,6 @@ class MultiDialog(QDialog):
             ok_all = False
             msg_all = str(e)
 
-        # 恢复界面
         self.btn_entry.setEnabled(True)
         self.txt_model.setEnabled(True)
         self.txt_total.setEnabled(True)
@@ -1201,10 +1198,6 @@ class MainWindow(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.monitor_wps)
 
-        self._batch_jump_timer = QTimer(self)
-        self._batch_jump_timer.setSingleShot(True)
-        self._batch_jump_timer.timeout.connect(self._batch_do_jump)
-
         QTimer.singleShot(0, self._deferred_init)
 
     def _deferred_init(self):
@@ -1226,10 +1219,6 @@ class MainWindow(QWidget):
 
         self.refresh_sheets()
         self.timer.start(500)
-
-        self._batch_jump_timer = QTimer(self)
-        self._batch_jump_timer.setSingleShot(True)
-        self._batch_jump_timer.timeout.connect(self._batch_do_jump)
 
     def build_ui(self):
         layout = QVBoxLayout(self)
@@ -1378,25 +1367,6 @@ class MainWindow(QWidget):
 
         layout.addLayout(row6)
 
-        row7 = QHBoxLayout()
-        row7.addWidget(QLabel("批量跳转延迟(毫秒)："))
-        self.spin_jump = QSpinBox()
-        self.spin_jump.setRange(0, 10000)
-        self.spin_jump.setSingleStep(100)
-        try:
-            _d = int(self.settings.value("batch_jump_delay_ms", 500, type=int))
-        except Exception:
-            _d = 500
-        if _d < 0:
-            _d = 0
-        if _d > 10000:
-            _d = 10000
-        self.spin_jump.setValue(_d)
-        self.spin_jump.valueChanged.connect(self.on_jump_delay_changed)
-        row7.addWidget(self.spin_jump)
-        row7.addStretch(1)
-        layout.addLayout(row7)
-
         self.log = QLabel("")
         self.log.setWordWrap(True)
         layout.addWidget(self.log)
@@ -1408,9 +1378,6 @@ class MainWindow(QWidget):
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
         self.show()
         self.settings.setValue("window_on_top", 1 if state else 0)
-
-    def on_jump_delay_changed(self, value):
-        self.settings.setValue("batch_jump_delay", int(value))
 
     def do_batch_start(self):
         if self.batch_mode:
@@ -1452,7 +1419,6 @@ class MainWindow(QWidget):
         self.batch_model = ""
         self.batch_history = []
         self.batch_mode = True
-        self._batch_jump_timer.stop()
 
         self.btn_batch.setText("退出批量")
 
@@ -1469,14 +1435,10 @@ class MainWindow(QWidget):
         self.txt_model.setPlaceholderText("请输入型号（回车后到数量框）")
 
         total = len(self.batch_persons)
-        try:
-            delay = int(self.spin_jump.value())
-        except Exception:
-            delay = 500
         self.log.setText(
             f"批量录入已开始：{first}（1/{total}）\n"
             f"请先输入型号，再输入数量。\n"
-            f"录入完成后会在当前 sheet 停留 {delay} 毫秒供核对，然后自动跳转下一位。\n"
+            f"录入完成后会自动跳转下一位。\n"
             f"发现录错可按 Ctrl+Z 或点'撤回'回退上一步。\n"
             f"想退出批量：点'退出批量'按钮 或 按 ESC。"
         )
@@ -1484,7 +1446,6 @@ class MainWindow(QWidget):
     def do_batch_entry(self):
         if not self.batch_mode:
             return
-        self._batch_jump_timer.stop()
 
         person = self.batch_persons[self.batch_index]
         total = len(self.batch_persons)
@@ -1543,42 +1504,11 @@ class MainWindow(QWidget):
 
         self.txt_qty.clear()
 
-        idx = self.batch_index + 1
-        if idx >= total:
-            tip = "已是最后一位，稍后自动结束"
-        else:
-            nxt = self.batch_persons[self.batch_index + 1]
-            tip = f"稍后自动跳转到 {nxt}"
-        try:
-            delay = int(self.spin_jump.value())
-        except Exception:
-            delay = 500
-        self.log.setText(
-            f"已录入 {person}（{idx}/{total}）：{self.batch_model} = {qty}\n"
-            f"{tip}（延迟 {delay} 毫秒）\n"
-            f"若要在当前 sheet 继续录入，可直接改型号/数量再回车；Ctrl+Z 撤回；ESC 退出"
-        )
-
-        self._batch_jump_timer.start(max(0, delay))
-        self.txt_qty.setFocus()
-
-    def _batch_do_jump(self):
-        if not self.batch_mode:
-            return
-
-        total = len(self.batch_persons)
-        expected = self.batch_persons[self.batch_index] if self.batch_index < total else ""
-
-        try:
-            current = self.conn.get_active_sheet_name()
-        except Exception:
-            current = ""
-        if current and expected and current != expected:
-            return
-
+        # ==================== 核心修改：立即跳转 ====================
         self.batch_index += 1
 
         if self.batch_index >= total:
+            # 批量结束
             done_model = self.batch_model
             done_count = total
             self.batch_mode = False
@@ -1594,24 +1524,23 @@ class MainWindow(QWidget):
                 self, "批量录入",
                 f"全部完成！\n型号：{done_model}\n共 {done_count} 人"
             )
-            return
+        else:
+            # 立即跳到下一个人
+            next_person = self.batch_persons[self.batch_index]
+            try:
+                self.conn.activate_sheet(next_person)
+                self._last_sheet = next_person
+                self.refresh_sheets()
+            except Exception as e:
+                print("切换 sheet 失败:", e)
 
-        next_person = self.batch_persons[self.batch_index]
-        try:
-            self.conn.activate_sheet(next_person)
-        except Exception as e:
-            print("切换 sheet 失败:", e)
-        self._last_sheet = next_person
-        self.refresh_sheets()
-
-        self.txt_qty.clear()
-        self.txt_qty.setFocus()
-
-        idx = self.batch_index + 1
-        self.log.setText(
-            f"批量录入：{self.batch_model} - {next_person}（{idx}/{total}）\n"
-            f"请输入数量；Ctrl+Z 撤回上一步；ESC 退出批量"
-        )
+            self.txt_qty.setFocus()
+            idx = self.batch_index + 1
+            self.log.setText(
+                f"批量录入：{self.batch_model} - {next_person}（{idx}/{total}）\n"
+                f"请输入数量；Ctrl+Z 撤回上一步；ESC 退出批量"
+            )
+        # ==================== 定时器调用已删除 ====================
 
     def do_batch_undo(self):
         if not self.batch_history:
@@ -1619,7 +1548,6 @@ class MainWindow(QWidget):
                                     "没有可回退的操作（已经是第一步）")
             return
 
-        self._batch_jump_timer.stop()
         item = self.batch_history.pop()
         person = item["person"]
         rec = item["record"]
@@ -1686,7 +1614,6 @@ class MainWindow(QWidget):
         )
 
     def _cancel_batch(self):
-        self._batch_jump_timer.stop()
         self.batch_mode = False
         self.batch_persons = []
         self.batch_index = 0
@@ -2513,10 +2440,6 @@ class MainWindow(QWidget):
     def closeEvent(self, event):
         try:
             self.timer.stop()
-        except Exception:
-            pass
-        try:
-            self._batch_jump_timer.stop()
         except Exception:
             pass
         try:
