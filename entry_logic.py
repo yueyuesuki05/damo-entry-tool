@@ -621,6 +621,7 @@ class EntryManager:
 
         try:
             for sh in wb.Sheets:
+                sname = "未知表"  # ★ 修复：防止 sh.Name 报错导致下文崩溃
                 try:
                     sname = sh.Name
                     if sname == "合计":
@@ -769,9 +770,13 @@ class EntryManager:
                 if last_col < 2:
                     continue
 
+                # ★ 修复：干磨表的日合计在第 36 行，普通表在第 34 行
+                is_ganmo = self._is_ganmo(wb.Name)
+                check_row = 36 if is_ganmo else 34
+
                 try:
                     rng_h = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
-                    rng_v = sh.Range(sh.Cells(34, 2), sh.Cells(34, last_col))
+                    rng_v = sh.Range(sh.Cells(check_row, 2), sh.Cells(check_row, last_col))
                     headers = rng_h.Value
                     values = rng_v.Value
 
@@ -1452,10 +1457,12 @@ class EntryManager:
 
         try:
             for sh in wb.Sheets:
+                name = "未知表"  # ★ 修复：确保 name 有定义
                 try:
                     name = sh.Name
                 except Exception:
                     continue
+
                 if name == "合计":
                     continue
 
@@ -1570,6 +1577,7 @@ class EntryManager:
 
         try:
             for sh in wb.Sheets:
+                sname = "未知表"  # ★ 修复：确保 sname 有定义
                 try:
                     sname = sh.Name
                     ps = sh.PageSetup
