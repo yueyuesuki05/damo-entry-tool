@@ -32,21 +32,24 @@ class WPSConnector:
                 self.wb = None
 
         pythoncom.CoInitialize()
-        for prog_id in ["KET.Application", "ET.Application", "WPS.Application"]:
-            # 先尝试连接已有实例
+
+        # 核心改动 1：把 KWPS.Application 放在最前面，适配新版 WPS
+        for prog_id in ["KWPS.Application", "KET.Application", "ET.Application", "WPS.Application"]:
             try:
+                # 核心改动 2：只使用 GetActiveObject，只连接你眼睛看得见的已打开的 WPS
                 self.app = win32com.client.GetActiveObject(prog_id)
-                print("连接成功（已运行实例）：", prog_id)
-                return True
+
+                # 核心改动 3：验证这个 WPS 进程里确实打开了表格，防止连到隐藏的空进程
+                if self.app.Workbooks.Count > 0:
+                    print("WPS 连接成功：", prog_id)
+                    return True
+                else:
+                    self.app = None  # 如果没有打开任何表格，就放弃这个进程
             except Exception:
                 pass
-            # 失败再尝试 Dispatch
-            try:
-                self.app = win32com.client.Dispatch(prog_id)
-                print("连接成功（Dispatch）：", prog_id)
-                return True
-            except Exception:
-                continue
+
+        # 核心改动 4：彻底删除了 Dispatch，绝对不让程序在后台偷偷启动隐藏的幽灵进程！
+        print("未找到已打开的 WPS 表格，请确保 WPS 已经打开了文件。")
         return False
 
     def get_active_workbook(self):
