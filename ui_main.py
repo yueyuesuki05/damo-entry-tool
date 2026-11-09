@@ -125,6 +125,7 @@ class MultiDialog(QDialog):
         self.settings = settings
         self.manager = entry_manager
         self.parent_window = parent
+        self.batch_count = 0  # 记录刚刚成功录入的人数
 
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         layout = QVBoxLayout(self)
@@ -183,19 +184,33 @@ class MultiDialog(QDialog):
         row_op.addWidget(self.lbl_opacity)
         layout.addLayout(row_op)
 
-        btn_row = QHBoxLayout()
+        # 第一排按钮
+        btn_row1 = QHBoxLayout()
         self.btn_entry = QPushButton("录入")
         self.btn_entry.clicked.connect(self.do_multi_entry)
-        btn_row.addWidget(self.btn_entry)
+        btn_row1.addWidget(self.btn_entry)
 
         btn_clear = QPushButton("清除选择")
         btn_clear.clicked.connect(self.clear_selection)
-        btn_row.addWidget(btn_clear)
+        btn_row1.addWidget(btn_clear)
 
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.close)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
+        btn_row1.addWidget(btn_close)
+        layout.addLayout(btn_row1)
+
+        # 第二排按钮：撤回与回退
+        btn_row2 = QHBoxLayout()
+        self.btn_undo = QPushButton("撤回上一批")
+        self.btn_undo.clicked.connect(self.do_multi_undo)
+        self.btn_undo.setEnabled(False)  # 初始不可用
+        btn_row2.addWidget(self.btn_undo)
+
+        self.btn_redo = QPushButton("回退上一批")
+        self.btn_redo.clicked.connect(self.do_multi_redo)
+        self.btn_redo.setEnabled(False)  # 初始不可用
+        btn_row2.addWidget(self.btn_redo)
+        layout.addLayout(btn_row2)
 
         self.setWindowOpacity(opacity / 100.0)
         self.list_widget.installEventFilter(self)
@@ -289,6 +304,10 @@ class MultiDialog(QDialog):
         self.btn_entry.setEnabled(False)
         self.txt_model.setEnabled(False)
         self.txt_total.setEnabled(False)
+        # 新录入一批时，重置撤回/回退按钮状态
+        self.btn_undo.setEnabled(False)
+        self.btn_redo.setEnabled(False)
+
         self.lbl_status.setText("正在处理，请稍候...")
         QApplication.processEvents()
 
@@ -303,16 +322,18 @@ class MultiDialog(QDialog):
             return
 
         results = []
+        actual_success_count = 0
+
         try:
             for i, name in enumerate(selected):
                 self.lbl_status.setText(f"正在录入 {name} ({i + 1}/{n})...")
                 QApplication.processEvents()
                 ok, msg = self.manager.entry(name, day, model, str(total_num / n))
+                if ok:
+                    actual_success_count += 1
                 results.append(f"{name}: {'成功' if ok else '失败：' + msg}")
-            ok_all = True
             msg_all = "\n".join(results)
         except Exception as e:
-            ok_all = False
             msg_all = str(e)
 
         self.btn_entry.setEnabled(True)
@@ -320,7 +341,11 @@ class MultiDialog(QDialog):
         self.txt_total.setEnabled(True)
 
         self.lbl_status.setText(msg_all)
-        if ok_all:
+
+        # 记录成功录入的人数，并激活撤回按钮
+        self.batch_count = actual_success_count
+        if self.batch_count > 0:
+            self.btn_undo.setEnabled(True)
             self.settings.setValue("multi_last_day", day)
             self.settings.setValue("multi_last_model", model)
             self._save_last_selection(selected)
@@ -329,6 +354,55 @@ class MultiDialog(QDialog):
             self.txt_total.clear()
             self.txt_model.setFocus()
             QTimer.singleShot(50, self._refocus)
+
+    def do_multi_undo(self):
+        """一起撤回刚刚录入的这批人"""
+        if self.batch_count <= 0:
+            return
+
+        reply = QMessageBox.question(
+            self, "批量撤回",
+            f"确定要撤回刚刚录入的这 {self.batch_count} 人的数据吗？\n（连续执行 {self.batch_count} 次撤回）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        success = 0
+        for _ in range(self.batch_count):
+            ok, _ = self.manager.undo()
+            if ok:
+                success += 1
+            else:
+                break
+
+        if success > 0:
+            self.lbl_status.setText(f"已成功撤回 {success} 人的数据。")
+            self.btn_undo.setEnabled(False)  # 已经撤回，防止重复点
+            self.btn_redo.setEnabled(True)  # 激活回退按钮
+        else:
+            self.lbl_status.setText("撤回失败。")
+
+    def do_multi_redo(self):
+        """一起回退刚刚撤回的这批人"""
+        if self.batch_count <= 0:
+            return
+
+        success = 0
+        for _ in range(self.batch_count):
+            ok, _ = self.manager.redo()
+            if ok:
+                success += 1
+            else:
+                break
+
+        if success > 0:
+            self.lbl_status.setText(f"已成功回退 {success} 人的数据。")
+            self.btn_redo.setEnabled(False)  # 已经回退，防止重复点
+            self.btn_undo.setEnabled(True)  # 激活撤回按钮
+        else:
+            self.lbl_status.setText("回退失败。")
 
     def _refocus(self):
         try:
@@ -1504,11 +1578,9 @@ class MainWindow(QWidget):
 
         self.txt_qty.clear()
 
-        # ==================== 核心修改：立即跳转 ====================
         self.batch_index += 1
 
         if self.batch_index >= total:
-            # 批量结束
             done_model = self.batch_model
             done_count = total
             self.batch_mode = False
@@ -1525,7 +1597,6 @@ class MainWindow(QWidget):
                 f"全部完成！\n型号：{done_model}\n共 {done_count} 人"
             )
         else:
-            # 立即跳到下一个人
             next_person = self.batch_persons[self.batch_index]
             try:
                 self.conn.activate_sheet(next_person)
@@ -1540,7 +1611,6 @@ class MainWindow(QWidget):
                 f"批量录入：{self.batch_model} - {next_person}（{idx}/{total}）\n"
                 f"请输入数量；Ctrl+Z 撤回上一步；ESC 退出批量"
             )
-        # ==================== 定时器调用已删除 ====================
 
     def do_batch_undo(self):
         if not self.batch_history:
@@ -1736,7 +1806,6 @@ class MainWindow(QWidget):
             self.log.setText("公式检查完成，无修正")
 
     def do_verify_formulas(self):
-        # 1. 获取当前所有打开的 WPS 工作簿
         if self.conn.app is None:
             QMessageBox.warning(self, "提示", "未连接到 WPS，请先打开需要检查的表格。")
             return
@@ -1747,7 +1816,6 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "提示", f"获取已打开工作簿失败：{e}")
             return
 
-        # 2. 过滤出我们需要检查的表格（只检查干磨、修帽子相关的表）
         target_wbs = []
         wb_names = []
         for wb in all_wbs:
@@ -1760,7 +1828,6 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "提示", "当前没有打开任何需要检查的工作簿（名称包含'干磨'或'修帽子'）。")
             return
 
-        # 3. 确认提示
         preview = "、\n".join(wb_names[:5])
         if len(wb_names) > 5:
             preview += f" 等 {len(wb_names)} 个文件"
@@ -1775,7 +1842,6 @@ class MainWindow(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        # 4. 遍历每个工作簿进行检查
         total_fixes = []
         for wb in target_wbs:
             try:
@@ -1786,7 +1852,6 @@ class MainWindow(QWidget):
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"检查工作簿 {wb.Name} 时出错：{e}")
 
-        # 5. 显示最终结果
         if total_fixes:
             preview = "\n".join(total_fixes[:15])
             if len(total_fixes) > 15:
@@ -1802,7 +1867,6 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "检查修正完成", "检查完毕，所有公式均符合规范，无需修正。")
             self.log.setText(f"已检查 {len(target_wbs)} 个文件，无修正")
 
-        # 刷新一下当前界面的缓存
         self.refresh_sheets()
 
     def do_check_margins(self):
@@ -2084,7 +2148,6 @@ class MainWindow(QWidget):
         current_model = self.txt_model.text().strip()
         current_qty = self.txt_qty.text().strip()
 
-        # 禁用输入防抖
         self.txt_model.setEnabled(False)
         self.txt_qty.setEnabled(False)
         QApplication.processEvents()
