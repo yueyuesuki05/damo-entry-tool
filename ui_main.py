@@ -117,15 +117,14 @@ class SingleStepComboBox(QComboBox):
 
 
 class MultiDialog(QDialog):
-    def __init__(self, sheet_names, settings, entry_manager,
-                 default_day="", parent=None):
+    def __init__(self, sheet_names, settings, entry_manager, default_day="", parent=None):
         super().__init__(parent)
         self.setWindowTitle("多人合作")
         self.resize(340, 580)
         self.settings = settings
         self.manager = entry_manager
         self.parent_window = parent
-        self.batch_count = 0  # 记录刚刚成功录入的人数
+        self.batch_count = 0
 
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         layout = QVBoxLayout(self)
@@ -172,10 +171,8 @@ class MultiDialog(QDialog):
             opacity = int(self.settings.value("opacity", 100, type=int))
         except Exception:
             opacity = 100
-        if opacity < 30:
-            opacity = 30
-        if opacity > 100:
-            opacity = 100
+        if opacity < 30: opacity = 30
+        if opacity > 100: opacity = 100
         self.slider_opacity.setValue(opacity)
         self.slider_opacity.valueChanged.connect(self.on_opacity_changed)
         row_op.addWidget(self.slider_opacity)
@@ -184,7 +181,6 @@ class MultiDialog(QDialog):
         row_op.addWidget(self.lbl_opacity)
         layout.addLayout(row_op)
 
-        # 第一排按钮
         btn_row1 = QHBoxLayout()
         self.btn_entry = QPushButton("录入")
         self.btn_entry.clicked.connect(self.do_multi_entry)
@@ -199,16 +195,15 @@ class MultiDialog(QDialog):
         btn_row1.addWidget(btn_close)
         layout.addLayout(btn_row1)
 
-        # 第二排按钮：撤回与回退
         btn_row2 = QHBoxLayout()
         self.btn_undo = QPushButton("撤回上一批")
         self.btn_undo.clicked.connect(self.do_multi_undo)
-        self.btn_undo.setEnabled(False)  # 初始不可用
+        self.btn_undo.setEnabled(False)
         btn_row2.addWidget(self.btn_undo)
 
         self.btn_redo = QPushButton("回退上一批")
         self.btn_redo.clicked.connect(self.do_multi_redo)
-        self.btn_redo.setEnabled(False)  # 初始不可用
+        self.btn_redo.setEnabled(False)
         btn_row2.addWidget(self.btn_redo)
         layout.addLayout(btn_row2)
 
@@ -220,6 +215,18 @@ class MultiDialog(QDialog):
 
         self.txt_model.textChanged.connect(lambda: self.lbl_status.clear())
         self.txt_total.textChanged.connect(lambda: self.lbl_status.clear())
+
+    def _show_msg(self, icon, title, text, buttons=QMessageBox.Ok, default=QMessageBox.Ok):
+        """安全弹窗，防止被置顶主窗口遮挡导致假死"""
+        msg = QMessageBox(self)
+        msg.setIcon(icon)
+        msg.setWindowTitle(title)
+        msg.setText(text)
+        msg.setStandardButtons(buttons)
+        msg.setDefaultButton(default)
+        if self.windowFlags() & Qt.WindowStaysOnTopHint:
+            msg.setWindowFlags(msg.windowFlags() | Qt.WindowStaysOnTopHint)
+        return msg.exec()
 
     def on_opacity_changed(self, value):
         self.setWindowOpacity(value / 100.0)
@@ -266,8 +273,7 @@ class MultiDialog(QDialog):
 
     def _restore_last_selection(self):
         raw = self.settings.value("multi_last_persons", "", type=str)
-        if not raw:
-            return
+        if not raw: return
         last_persons = [x for x in raw.split(",") if x.strip()]
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
@@ -288,14 +294,10 @@ class MultiDialog(QDialog):
         total = self.txt_total.text().strip()
 
         missing = []
-        if not selected:
-            missing.append("合作人员")
-        if not day:
-            missing.append("日期")
-        if not model:
-            missing.append("型号")
-        if not total:
-            missing.append("总数")
+        if not selected: missing.append("合作人员")
+        if not day: missing.append("日期")
+        if not model: missing.append("型号")
+        if not total: missing.append("总数")
 
         if missing:
             self.lbl_status.setText("未填写完整：" + "、".join(missing))
@@ -304,7 +306,6 @@ class MultiDialog(QDialog):
         self.btn_entry.setEnabled(False)
         self.txt_model.setEnabled(False)
         self.txt_total.setEnabled(False)
-        # 新录入一批时，重置撤回/回退按钮状态
         self.btn_undo.setEnabled(False)
         self.btn_redo.setEnabled(False)
 
@@ -341,9 +342,8 @@ class MultiDialog(QDialog):
         self.txt_total.setEnabled(True)
 
         self.lbl_status.setText(msg_all)
-
-        # 记录成功录入的人数，并激活撤回按钮
         self.batch_count = actual_success_count
+
         if self.batch_count > 0:
             self.btn_undo.setEnabled(True)
             self.settings.setValue("multi_last_day", day)
@@ -356,18 +356,11 @@ class MultiDialog(QDialog):
             QTimer.singleShot(50, self._refocus)
 
     def do_multi_undo(self):
-        """一起撤回刚刚录入的这批人"""
-        if self.batch_count <= 0:
-            return
-
-        reply = QMessageBox.question(
-            self, "批量撤回",
-            f"确定要撤回刚刚录入的这 {self.batch_count} 人的数据吗？\n（连续执行 {self.batch_count} 次撤回）",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        if reply != QMessageBox.Yes:
-            return
+        if self.batch_count <= 0: return
+        reply = self._show_msg(QMessageBox.Question, "批量撤回",
+                               f"确定要撤回刚刚录入的这 {self.batch_count} 人的数据吗？\n（连续执行 {self.batch_count} 次撤回）",
+                               QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes: return
 
         success = 0
         for _ in range(self.batch_count):
@@ -379,16 +372,13 @@ class MultiDialog(QDialog):
 
         if success > 0:
             self.lbl_status.setText(f"已成功撤回 {success} 人的数据。")
-            self.btn_undo.setEnabled(False)  # 已经撤回，防止重复点
-            self.btn_redo.setEnabled(True)  # 激活回退按钮
+            self.btn_undo.setEnabled(False)
+            self.btn_redo.setEnabled(True)
         else:
             self.lbl_status.setText("撤回失败。")
 
     def do_multi_redo(self):
-        """一起回退刚刚撤回的这批人"""
-        if self.batch_count <= 0:
-            return
-
+        if self.batch_count <= 0: return
         success = 0
         for _ in range(self.batch_count):
             ok, _ = self.manager.redo()
@@ -399,8 +389,8 @@ class MultiDialog(QDialog):
 
         if success > 0:
             self.lbl_status.setText(f"已成功回退 {success} 人的数据。")
-            self.btn_redo.setEnabled(False)  # 已经回退，防止重复点
-            self.btn_undo.setEnabled(True)  # 激活撤回按钮
+            self.btn_redo.setEnabled(False)
+            self.btn_undo.setEnabled(True)
         else:
             self.lbl_status.setText("回退失败。")
 
@@ -413,8 +403,7 @@ class MultiDialog(QDialog):
             pass
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            return
+        if event.key() == Qt.Key_Escape: return
         super().keyPressEvent(event)
 
 
@@ -424,7 +413,6 @@ class MultiBatchDialog(QDialog):
         self.setWindowTitle("批量录入 - 选择人员")
         self.resize(320, 540)
         self.settings = settings
-
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         layout = QVBoxLayout(self)
 
@@ -452,11 +440,9 @@ class MultiBatchDialog(QDialog):
         btn_ok = QPushButton("开始批量录入")
         btn_ok.clicked.connect(self.accept)
         btn_row.addWidget(btn_ok)
-
         btn_clear = QPushButton("清除选择")
         btn_clear.clicked.connect(self.clear_selection)
         btn_row.addWidget(btn_clear)
-
         btn_cancel = QPushButton("取消")
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
@@ -486,15 +472,10 @@ class CleanEmptyDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("清理空列")
         self.resize(560, 640)
-
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-
         layout = QVBoxLayout(self)
 
-        info = QLabel(
-            f"共发现 {total} 个空列，分布在 {sheet_count} 个 sheet：\n"
-            f"（删除后无法自动恢复，请确认）"
-        )
+        info = QLabel(f"共发现 {total} 个空列，分布在 {sheet_count} 个 sheet：\n（删除后无法自动恢复，请确认）")
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -505,15 +486,12 @@ class CleanEmptyDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-
         btn_ok = QPushButton("确认删除")
         btn_ok.clicked.connect(self.accept)
         btn_row.addWidget(btn_ok)
-
         btn_cancel = QPushButton("取消")
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
-
         layout.addLayout(btn_row)
 
     def keyPressEvent(self, event):
@@ -530,7 +508,6 @@ class QueryDateDialog(QDialog):
         self.resize(700, 760)
         self.conn = conn
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-
         layout = QVBoxLayout(self)
 
         row_wb = QHBoxLayout()
@@ -539,7 +516,6 @@ class QueryDateDialog(QDialog):
         self.cbo_wb.setMinimumWidth(320)
         self.cbo_wb.currentIndexChanged.connect(self._on_wb_changed)
         row_wb.addWidget(self.cbo_wb, 1)
-
         btn_refresh_wb = QPushButton("刷新工作簿")
         btn_refresh_wb.clicked.connect(self._load_workbooks)
         row_wb.addWidget(btn_refresh_wb)
@@ -551,19 +527,15 @@ class QueryDateDialog(QDialog):
         self.txt_day.setFixedWidth(80)
         self.txt_day.returnPressed.connect(self.do_query)
         row.addWidget(self.txt_day)
-
         btn_query = QPushButton("查询")
         btn_query.clicked.connect(self.do_query)
         row.addWidget(btn_query)
-
         btn_all = QPushButton("全选")
         btn_all.clicked.connect(lambda: self._set_all(True))
         row.addWidget(btn_all)
-
         btn_none = QPushButton("全不选")
         btn_none.clicked.connect(lambda: self._set_all(False))
         row.addWidget(btn_none)
-
         row.addStretch(1)
         layout.addLayout(row)
 
@@ -571,12 +543,10 @@ class QueryDateDialog(QDialog):
         row_manual.addWidget(QLabel("或直接输入人员："))
         self.txt_persons_manual = QLineEdit()
         self.txt_persons_manual.setPlaceholderText(
-            "留空则用下方勾选；填写则只看这里的人名（逗号/顿号/分号分隔，如：张三,李四）"
-        )
+            "留空则用下方勾选；填写则只看这里的人名（逗号/顿号/分号分隔，如：张三,李四）")
         self.txt_persons_manual.returnPressed.connect(self.do_query)
         self.txt_persons_manual.textChanged.connect(self._on_manual_changed)
         row_manual.addWidget(self.txt_persons_manual, 1)
-
         btn_clear_manual = QPushButton("清空")
         btn_clear_manual.clicked.connect(self.txt_persons_manual.clear)
         row_manual.addWidget(btn_clear_manual)
@@ -620,8 +590,7 @@ class QueryDateDialog(QDialog):
             active_name = ""
             try:
                 awb = self.conn.app.ActiveWorkbook
-                if awb is not None:
-                    active_name = awb.Name
+                if awb is not None: active_name = awb.Name
             except Exception:
                 pass
 
@@ -633,15 +602,11 @@ class QueryDateDialog(QDialog):
                 except Exception:
                     continue
                 self.cbo_wb.addItem(nm)
-                if nm == active_name:
-                    idx_active = i
+                if nm == active_name: idx_active = i
                 i += 1
-
-            if idx_active >= 0:
-                self.cbo_wb.setCurrentIndex(idx_active)
+            if idx_active >= 0: self.cbo_wb.setCurrentIndex(idx_active)
         except Exception as e:
             print("加载工作簿列表失败:", e)
-
         self._load_sheets()
 
     def _on_wb_changed(self, _index):
@@ -649,8 +614,7 @@ class QueryDateDialog(QDialog):
 
     def _get_selected_wb(self):
         name = self.cbo_wb.currentText().strip()
-        if not name or self.conn.app is None:
-            return None
+        if not name or self.conn.app is None: return None
         try:
             return self.conn.app.Workbooks(name)
         except Exception:
@@ -659,16 +623,14 @@ class QueryDateDialog(QDialog):
     def _load_sheets(self):
         self.list_sheets.clear()
         wb = self._get_selected_wb()
-        if wb is None:
-            return
+        if wb is None: return
         try:
             for sh in wb.Sheets:
                 try:
                     n = sh.Name
                 except Exception:
                     continue
-                if n == "合计":
-                    continue
+                if n == "合计": continue
                 item = QListWidgetItem(n)
                 item.setSelected(True)
                 self.list_sheets.addItem(item)
@@ -688,21 +650,14 @@ class QueryDateDialog(QDialog):
             self.list_sheets.setStyleSheet("")
 
     def _parse_manual_persons(self, raw):
-        for sep in ["，", "、", ";", "；", "\n", "\r", "\t", "|"]:
-            raw = raw.replace(sep, ",")
-        parts = []
-        for p in raw.split(","):
-            p = p.strip()
-            if p:
-                parts.append(p)
-        return parts
+        for sep in ["，", "、", ";", "；", "\n", "\r", "\t", "|"]: raw = raw.replace(sep, ",")
+        return [p.strip() for p in raw.split(",") if p.strip()]
 
     def do_query(self):
         day_str = self.txt_day.text().strip()
         try:
             day = int(day_str)
-            if day < 1 or day > 31:
-                raise ValueError
+            if day < 1 or day > 31: raise ValueError
         except ValueError:
             self.txt_result.setPlainText("请输入 1-31 的日期。")
             return
@@ -729,7 +684,6 @@ class QueryDateDialog(QDialog):
                 seen.add(n)
                 ordered.append(n)
         selected = ordered
-
         row = day + 2
 
         try:
@@ -738,7 +692,6 @@ class QueryDateDialog(QDialog):
             wb_name = "?"
 
         lines = [f"工作簿：{wb_name}", f"日期：{day} 号（第 {row} 行）", "=" * 40]
-
         missing_sheets = []
         try:
             all_names = set()
@@ -748,14 +701,12 @@ class QueryDateDialog(QDialog):
                 except Exception:
                     continue
             for n in selected:
-                if n not in all_names:
-                    missing_sheets.append(n)
+                if n not in all_names: missing_sheets.append(n)
         except Exception:
             pass
 
         total_overall = 0
         any_data = False
-
         try:
             try:
                 self.conn.app.ScreenUpdating = False
@@ -767,27 +718,21 @@ class QueryDateDialog(QDialog):
                     sh = wb.Sheets(sheet_name)
                 except Exception:
                     continue
-
                 try:
                     last_col = self.conn.scan_last_model_col(sh)
                 except Exception:
                     continue
-                if last_col < 2:
-                    continue
+                if last_col < 2: continue
 
                 try:
                     rng_h = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
                     rng_v = sh.Range(sh.Cells(row, 2), sh.Cells(row, last_col))
                     headers = rng_h.Value
                     values = rng_v.Value
-                    if not isinstance(headers, tuple):
-                        headers = (headers,)
-                    if not isinstance(values, tuple):
-                        values = (values,)
-                    if headers and isinstance(headers[0], tuple):
-                        headers = headers[0]
-                    if values and isinstance(values[0], tuple):
-                        values = values[0]
+                    if not isinstance(headers, tuple): headers = (headers,)
+                    if not isinstance(values, tuple): values = (values,)
+                    if headers and isinstance(headers[0], tuple): headers = headers[0]
+                    if values and isinstance(values[0], tuple): values = values[0]
                 except Exception as e:
                     print(f"读 {sheet_name} 失败: {e}")
                     continue
@@ -795,17 +740,14 @@ class QueryDateDialog(QDialog):
                 items = []
                 sheet_total = 0
                 for h, v in zip(headers, values):
-                    if h is None:
-                        continue
+                    if h is None: continue
                     hs = str(h).strip()
-                    if not hs:
-                        continue
+                    if not hs: continue
                     try:
                         v_num = float(v) if v is not None else 0
                     except (ValueError, TypeError):
                         v_num = 0
-                    if v_num == 0:
-                        continue
+                    if v_num == 0: continue
                     items.append((hs, v_num))
                     sheet_total += v_num
 
@@ -817,8 +759,7 @@ class QueryDateDialog(QDialog):
                         val_str = str(int(val)) if val == int(val) else f"{val:g}"
                         lines.append(f"    {name}：{val_str}")
                     if len(items) > 1:
-                        ts = str(int(sheet_total)) if sheet_total == int(sheet_total) \
-                            else f"{sheet_total:g}"
+                        ts = str(int(sheet_total)) if sheet_total == int(sheet_total) else f"{sheet_total:g}"
                         lines.append(f"    小计：{ts}")
                     total_overall += sheet_total
         finally:
@@ -830,8 +771,7 @@ class QueryDateDialog(QDialog):
         if missing_sheets:
             lines.append("")
             lines.append("未找到以下 sheet：")
-            for n in missing_sheets:
-                lines.append(f"    · {n}")
+            for n in missing_sheets: lines.append(f"    · {n}")
 
         if not any_data:
             lines.append("")
@@ -839,8 +779,7 @@ class QueryDateDialog(QDialog):
         else:
             lines.append("")
             lines.append("=" * 40)
-            ts = str(int(total_overall)) if total_overall == int(total_overall) \
-                else f"{total_overall:g}"
+            ts = str(int(total_overall)) if total_overall == int(total_overall) else f"{total_overall:g}"
             lines.append(f"总计：{ts}")
 
         self.txt_result.setPlainText("\n".join(lines))
@@ -860,7 +799,6 @@ class GlobalQueryDialog(QDialog):
         self.conn = conn
         self.person_map = {}
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-
         layout = QVBoxLayout(self)
 
         row1 = QHBoxLayout()
@@ -868,13 +806,11 @@ class GlobalQueryDialog(QDialog):
         self.cbo_person = QComboBox()
         self.cbo_person.setEditable(True)
         self.cbo_person.setMinimumWidth(250)
-
         completer = self.cbo_person.completer()
         if completer:
             completer.setFilterMode(Qt.MatchContains)
             completer.setCompletionMode(QCompleter.PopupCompletion)
             completer.setCaseSensitivity(Qt.CaseInsensitive)
-
         self.cbo_person.currentTextChanged.connect(self._on_person_changed)
         row1.addWidget(self.cbo_person)
 
@@ -882,7 +818,6 @@ class GlobalQueryDialog(QDialog):
         self.txt_day = QLineEdit()
         self.txt_day.setPlaceholderText("留空=查所有日期")
         row1.addWidget(self.txt_day)
-
         layout.addLayout(row1)
 
         layout.addWidget(QLabel("选择需要查询的工作簿（当前WPS已打开）："))
@@ -900,12 +835,10 @@ class GlobalQueryDialog(QDialog):
         btn_none = QPushButton("全不选")
         btn_none.clicked.connect(lambda: self._set_all_wbs(False))
         btn_row.addWidget(btn_none)
-
         btn_query = QPushButton("开始查询")
         btn_query.clicked.connect(self.do_query)
         btn_query.setStyleSheet("background-color: #0078D7; color: white; font-weight: bold;")
         btn_row.addWidget(btn_query)
-
         layout.addLayout(btn_row)
 
         self.txt_result = QPlainTextEdit()
@@ -918,11 +851,9 @@ class GlobalQueryDialog(QDialog):
 
     def _on_person_changed(self, text):
         person = re.sub(r'\(.*\)$', '', text).strip()
-
         if not person:
             self.list_wbs.clear()
             return
-
         if person in self.person_map:
             wbs = self.person_map[person]
             self.list_wbs.clear()
@@ -933,56 +864,44 @@ class GlobalQueryDialog(QDialog):
 
     def _read_range(self, rng):
         vals = rng.Value
-        if vals is None:
-            return ()
-        if not isinstance(vals, tuple):
-            return ((vals,),)
-        if not isinstance(vals[0], tuple):
-            return (vals,)
+        if vals is None: return ()
+        if not isinstance(vals, tuple): return ((vals,),)
+        if not isinstance(vals[0], tuple): return (vals,)
         return vals
 
     def _load_workbooks_and_persons(self):
         self.list_wbs.clear()
         self.cbo_person.clear()
         self.person_map.clear()
-
         if self.conn.app is None:
             try:
                 self.conn.connect()
             except Exception:
                 pass
-        if self.conn.app is None:
-            return
+        if self.conn.app is None: return
 
         try:
             for wb in self.conn.app.Workbooks:
                 wb_name = wb.Name
                 for sh in wb.Sheets:
                     sh_name = sh.Name
-                    if sh_name == "合计":
-                        continue
-
+                    if sh_name == "合计": continue
                     if re.match(r'^[\u4e00-\u9fa5]{2,4}$', sh_name):
                         self.person_map.setdefault(sh_name, []).append(wb_name)
                     else:
                         used = sh.UsedRange
                         max_r = min(used.Row + used.Rows.Count - 1, 50)
                         max_c = min(used.Column + used.Columns.Count - 1, 20)
-                        if max_r < 1 or max_c < 1:
-                            continue
-
+                        if max_r < 1 or max_c < 1: continue
                         r_limit = min(5, max_r)
                         header_data = self._read_range(sh.Range(sh.Cells(1, 1), sh.Cells(r_limit, max_c)))
-
                         col_person = -1
                         for r_idx, row in enumerate(header_data):
                             for c_idx, v in enumerate(row):
                                 if v and "姓名" in str(v):
                                     col_person = c_idx + 1
                                     break
-                            if col_person > 0:
-                                break
-
+                            if col_person > 0: break
                         if col_person > 0:
                             col_vals = self._read_range(sh.Range(sh.Cells(1, col_person), sh.Cells(max_r, col_person)))
                             for row_vals in col_vals:
@@ -995,10 +914,8 @@ class GlobalQueryDialog(QDialog):
             for name, wbs in sorted(self.person_map.items()):
                 wb_str = ",".join(sorted(set(wbs)))
                 self.cbo_person.addItem(f"{name}({wb_str})")
-
             if self.cbo_person.count() > 0:
                 self.cbo_person.setCurrentIndex(0)
-
         except Exception as e:
             print("加载工作簿失败:", e)
 
@@ -1009,13 +926,11 @@ class GlobalQueryDialog(QDialog):
     def do_query(self):
         raw_person = self.cbo_person.currentText().strip()
         person = re.sub(r'\(.*\)$', '', raw_person).strip()
-
         date_str = self.txt_day.text().strip()
 
         if not person:
             QMessageBox.warning(self, "提示", "请输入或选择人员姓名")
             return
-
         selected_wbs = [i.text() for i in self.list_wbs.selectedItems()]
         if not selected_wbs:
             QMessageBox.warning(self, "提示", "请至少选择一个工作簿")
@@ -1026,7 +941,6 @@ class GlobalQueryDialog(QDialog):
         QApplication.processEvents()
 
         results = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-
         try:
             self.conn.app.ScreenUpdating = False
             self.conn.app.Calculation = -4135
@@ -1041,13 +955,11 @@ class GlobalQueryDialog(QDialog):
                 wb = self.conn.app.Workbooks(wb_name)
             except Exception:
                 continue
-
             for sh in wb.Sheets:
                 try:
                     sh_name = sh.Name
                 except Exception:
                     continue
-
                 if sh_name == person:
                     self._parse_paidan_sheet(sh, wb_name, date_str, results)
                 elif "退打磨" in wb_name:
@@ -1065,10 +977,8 @@ class GlobalQueryDialog(QDialog):
         for wb_name, types_data in results.items():
             report_lines.append(f"【{wb_name}】")
             wb_total = 0
-
             for type_name, models_data in types_data.items():
-                if not models_data:
-                    continue
+                if not models_data: continue
                 report_lines.append(f"  -- {type_name} --")
                 type_total = 0
                 for model, qty in sorted(models_data.items()):
@@ -1079,7 +989,6 @@ class GlobalQueryDialog(QDialog):
                 if type_total > 0:
                     report_lines.append(f"      小计：{int(type_total) if type_total.is_integer() else type_total}")
                     wb_total += type_total
-
             if wb_total > 0:
                 report_lines.append(f"  >> {wb_name} 总计：{int(wb_total) if wb_total.is_integer() else wb_total}\n")
                 total_grand += wb_total
@@ -1095,7 +1004,6 @@ class GlobalQueryDialog(QDialog):
                 report_lines.append(f"    {model} : {int(qty) if qty.is_integer() else qty}")
             report_lines.append("=" * 30)
             report_lines.append(f"总计数量：{int(total_grand) if total_grand.is_integer() else total_grand}")
-
             self.txt_result.setPlainText("\n".join(report_lines))
 
     def _parse_paidan_sheet(self, sh, wb_name, date_str, results):
@@ -1103,7 +1011,6 @@ class GlobalQueryDialog(QDialog):
             used = sh.UsedRange
             last_col = min(used.Column + used.Columns.Count - 1, 200)
             if last_col < 2: return
-
             if date_str:
                 try:
                     day = int(date_str)
@@ -1111,11 +1018,9 @@ class GlobalQueryDialog(QDialog):
                     return
                 r = day + 2
                 if not (3 <= r <= 33): return
-
                 rng_h = self._read_range(sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col)))[0]
                 rng_v = self._read_range(sh.Range(sh.Cells(34, 2), sh.Cells(34, last_col)))[0]
                 rng_day = self._read_range(sh.Range(sh.Cells(r, 2), sh.Cells(r, last_col)))[0]
-
                 for h, v, d in zip(rng_h, rng_v, rng_day):
                     if h is not None and d is not None and str(d).strip() != "":
                         q = float(v) if v is not None else 0
@@ -1124,8 +1029,7 @@ class GlobalQueryDialog(QDialog):
                                 q = float(d)
                             except:
                                 q = 1
-                        if q > 0:
-                            results[wb_name]["排单表(按天)"][str(h).strip()] += q
+                        if q > 0: results[wb_name]["排单表(按天)"][str(h).strip()] += q
             else:
                 rng_h = self._read_range(sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col)))[0]
                 rng_v = self._read_range(sh.Range(sh.Cells(34, 2), sh.Cells(34, last_col)))[0]
@@ -1133,8 +1037,7 @@ class GlobalQueryDialog(QDialog):
                     if h is not None and v is not None:
                         try:
                             q = float(v)
-                            if q > 0:
-                                results[wb_name]["排单表(全周期)"][str(h).strip()] += q
+                            if q > 0: results[wb_name]["排单表(全周期)"][str(h).strip()] += q
                         except:
                             pass
         except Exception:
@@ -1145,18 +1048,13 @@ class GlobalQueryDialog(QDialog):
             used = sh.UsedRange
             max_r = used.Row + used.Rows.Count - 1
             if max_r < 3: return
-
             rng = self._read_range(sh.Range(sh.Cells(3, 1), sh.Cells(max_r, 4)))
             current_day = None
             for row in rng:
                 if not row or len(row) < 4: continue
                 a_val = row[0]
-                if a_val is not None and str(a_val).strip() != "":
-                    current_day = str(a_val).strip()
-
-                if date_str and current_day != date_str:
-                    continue
-
+                if a_val is not None and str(a_val).strip() != "": current_day = str(a_val).strip()
+                if date_str and current_day != date_str: continue
                 model = row[2]
                 qty = row[3]
                 if model and qty:
@@ -1174,13 +1072,10 @@ class GlobalQueryDialog(QDialog):
             max_r = used.Row + used.Rows.Count - 1
             max_c = used.Column + used.Columns.Count - 1
             if max_r < 2 or max_c < 2: return
-
             r_limit = min(10, max_r)
             c_limit = min(30, max_c)
             header_data = self._read_range(sh.Range(sh.Cells(1, 1), sh.Cells(r_limit, c_limit)))
-
             col_person, col_model, col_qty, col_date, header_row = -1, -1, -1, -1, -1
-
             for r_idx, row in enumerate(header_data):
                 for c_idx, v in enumerate(row):
                     if v is None: continue
@@ -1197,20 +1092,16 @@ class GlobalQueryDialog(QDialog):
                     elif "日期" in s or "时间" in s:
                         col_date = c_idx + 1;
                         header_row = r_idx + 1
-
             if col_model > 0 and col_qty > 0 and header_row > 0 and col_person > 0:
                 if header_row + 1 <= max_r:
                     rng = self._read_range(sh.Range(sh.Cells(header_row + 1, 1), sh.Cells(max_r, max_c)))
                     for row in rng:
                         if not row or len(row) < max(col_person, col_model, col_qty): continue
-
                         p_val = row[col_person - 1]
                         if p_val is None or str(p_val).strip() != person: continue
-
                         if date_str and col_date > 0:
                             d_val = row[col_date - 1]
                             if d_val is None or str(d_val).strip() != date_str: continue
-
                         model = row[col_model - 1]
                         qty = row[col_qty - 1]
                         if model and qty:
@@ -1230,7 +1121,6 @@ class MainWindow(QWidget):
         self.resize(880, 380)
 
         self.settings = QSettings("config.ini", QSettings.IniFormat)
-
         self.conn = None
         self.price_table = None
         self.manager = None
@@ -1250,8 +1140,7 @@ class MainWindow(QWidget):
             on_top = int(self.settings.value("window_on_top", 1, type=int))
         except Exception:
             on_top = 1
-        if on_top:
-            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        if on_top: self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         self.build_ui()
         self.chk_top.setChecked(bool(on_top))
@@ -1260,43 +1149,46 @@ class MainWindow(QWidget):
             opacity = int(self.settings.value("opacity", 100, type=int))
         except Exception:
             opacity = 100
-        if opacity < 30:
-            opacity = 30
-        if opacity > 100:
-            opacity = 100
+        if opacity < 30: opacity = 30
+        if opacity > 100: opacity = 100
         self.slider_opacity.setValue(opacity)
         self._apply_opacity(opacity)
 
         self.log.setText("正在初始化...")
-
         self.timer = QTimer()
         self.timer.timeout.connect(self.monitor_wps)
-
         QTimer.singleShot(0, self._deferred_init)
+
+    def _show_msg(self, icon, title, text, buttons=QMessageBox.Ok, default=QMessageBox.Ok):
+        """安全弹窗，防止被置顶主窗口遮挡导致假死"""
+        msg = QMessageBox(self)
+        msg.setIcon(icon)
+        msg.setWindowTitle(title)
+        msg.setText(text)
+        msg.setStandardButtons(buttons)
+        msg.setDefaultButton(default)
+        if self.windowFlags() & Qt.WindowStaysOnTopHint:
+            msg.setWindowFlags(msg.windowFlags() | Qt.WindowStaysOnTopHint)
+        return msg.exec()
 
     def _deferred_init(self):
         self.conn = WPSConnector()
         self.conn.connect()
-
         self.price_table = PriceTable()
         price_path = self.settings.value("price_file", "", type=str)
         if price_path:
             self.price_table.set_path(price_path)
             self.price_table.load()
-
         self.manager = EntryManager(self.conn, price_table=self.price_table)
-
         if self.price_table.loaded:
             self.log.setText(f"单价表已加载（{len(self.price_table.data)} 个型号）")
         else:
             self.log.setText("提示：点击'单价表'按钮选择单价表文件")
-
         self.refresh_sheets()
         self.timer.start(500)
 
     def build_ui(self):
         layout = QVBoxLayout(self)
-
         self.lbl_status = QLabel("当前工作簿：-    当前人员：-")
         layout.addWidget(self.lbl_status)
 
@@ -1326,8 +1218,7 @@ class MainWindow(QWidget):
         row3.addWidget(QLabel("型号："))
         self.txt_model = QLineEdit()
         last_model = self.settings.value("last_model", "", type=str)
-        if last_model:
-            self.txt_model.setPlaceholderText(f"上次填过：{last_model}（空着不算填）")
+        if last_model: self.txt_model.setPlaceholderText(f"上次填过：{last_model}（空着不算填）")
         self.txt_model.returnPressed.connect(lambda: self.txt_qty.setFocus())
         self.txt_model.installEventFilter(self)
         row3.addWidget(self.txt_model)
@@ -1342,75 +1233,57 @@ class MainWindow(QWidget):
         layout.addLayout(row4)
 
         btn_layout = FlowLayout(h_spacing=6, v_spacing=6)
-
         btn_entry = QPushButton("录入")
         btn_entry.clicked.connect(self.do_entry)
         btn_layout.addWidget(btn_entry)
-
         btn_undo = QPushButton("撤回")
         btn_undo.clicked.connect(self.do_undo)
         btn_layout.addWidget(btn_undo)
-
         btn_redo = QPushButton("回退")
         btn_redo.clicked.connect(self.do_redo)
         btn_layout.addWidget(btn_redo)
-
         btn_clear_day = QPushButton("清空某日数据")
         btn_clear_day.clicked.connect(self.do_clear_day)
         btn_layout.addWidget(btn_clear_day)
-
         btn_replace_model = QPushButton("修改表头型号")
         btn_replace_model.clicked.connect(self.do_replace_model)
         btn_layout.addWidget(btn_replace_model)
-
         btn_multi = QPushButton("多人合作")
         btn_multi.clicked.connect(self.do_multi)
         btn_layout.addWidget(btn_multi)
-
         self.btn_batch = QPushButton("批量录入")
         self.btn_batch.clicked.connect(self.do_batch_start)
         btn_layout.addWidget(self.btn_batch)
-
         btn_add = QPushButton("新增人员")
         btn_add.clicked.connect(self.do_add_person)
         btn_layout.addWidget(btn_add)
-
         btn_clean_sheets = QPushButton("清理离职表")
         btn_clean_sheets.clicked.connect(self.do_clean_empty_sheets)
         btn_layout.addWidget(btn_clean_sheets)
-
         btn_price = QPushButton("单价表")
         btn_price.clicked.connect(self.do_select_price_file)
         btn_layout.addWidget(btn_price)
-
         btn_reload = QPushButton("重载单价表")
         btn_reload.clicked.connect(self.do_reload_price_file)
         btn_layout.addWidget(btn_reload)
-
         btn_missing = QPushButton("检查缺失单价")
         btn_missing.clicked.connect(self.do_check_missing_prices)
         btn_layout.addWidget(btn_missing)
-
         btn_clean = QPushButton("清理空列")
         btn_clean.clicked.connect(self.do_clean_empty)
         btn_layout.addWidget(btn_clean)
-
         btn_verify = QPushButton("检查修正公式")
         btn_verify.clicked.connect(self.do_verify_formulas)
         btn_layout.addWidget(btn_verify)
-
         btn_margin = QPushButton("检查排版(边距/横打)")
         btn_margin.clicked.connect(self.do_check_margins)
         btn_layout.addWidget(btn_margin)
-
         btn_summary = QPushButton("修帽子合计统计")
         btn_summary.clicked.connect(self.do_make_summary)
         btn_layout.addWidget(btn_summary)
-
         btn_query = QPushButton("查询某天记录")
         btn_query.clicked.connect(self.do_query_date)
         btn_layout.addWidget(btn_query)
-
         btn_global_query = QPushButton("🔍 跨表综合查询")
         btn_global_query.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         btn_global_query.clicked.connect(self.do_global_query)
@@ -1433,12 +1306,10 @@ class MainWindow(QWidget):
         self.lbl_opacity = QLabel("100%")
         self.lbl_opacity.setFixedWidth(50)
         row6.addWidget(self.lbl_opacity)
-
         self.chk_top = QCheckBox("窗口置顶")
         self.chk_top.setChecked(True)
         self.chk_top.stateChanged.connect(self.on_top_changed)
         row6.addWidget(self.chk_top)
-
         layout.addLayout(row6)
 
         self.log = QLabel("")
@@ -1455,45 +1326,36 @@ class MainWindow(QWidget):
 
     def do_batch_start(self):
         if self.batch_mode:
-            reply = QMessageBox.question(
-                self, "退出批量录入",
-                f"当前进度：{self.batch_index + 1}/{len(self.batch_persons)}\n"
-                f"已录入的会保留，未录入的跳过。\n\n是否退出批量录入？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                self._cancel_batch()
+            reply = self._show_msg(QMessageBox.Question, "退出批量录入",
+                                   f"当前进度：{self.batch_index + 1}/{len(self.batch_persons)}\n已录入的会保留，未录入的跳过。\n\n是否退出批量录入？",
+                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes: self._cancel_batch()
             return
 
         wb_name = self.conn.get_workbook_name()
         if "干磨" not in wb_name:
-            QMessageBox.warning(self, "提示",
-                                f"批量录入仅用于干磨表，当前工作簿：{wb_name}")
+            self._show_msg(QMessageBox.Warning, "提示", f"批量录入仅用于干磨表，当前工作簿：{wb_name}")
             return
 
         names = self.conn.get_sheet_names()
         if not names:
-            QMessageBox.warning(self, "提示", "当前工作簿没有可用的 sheet。")
+            self._show_msg(QMessageBox.Warning, "提示", "当前工作簿没有可用的 sheet。")
             return
 
         dlg = MultiBatchDialog(names, self.settings, self)
-        if dlg.exec() != QDialog.Accepted:
-            return
+        if dlg.exec() != QDialog.Accepted: return
 
         selected = dlg.get_selected()
         if not selected:
-            QMessageBox.warning(self, "提示", "至少选择一个人。")
+            self._show_msg(QMessageBox.Warning, "提示", "至少选择一个人。")
             return
 
         self.settings.setValue("batch_last_persons", ",".join(selected))
-
         self.batch_persons = selected
         self.batch_index = 0
         self.batch_model = ""
         self.batch_history = []
         self.batch_mode = True
-
         self.btn_batch.setText("退出批量")
 
         first = self.batch_persons[0]
@@ -1510,34 +1372,22 @@ class MainWindow(QWidget):
 
         total = len(self.batch_persons)
         self.log.setText(
-            f"批量录入已开始：{first}（1/{total}）\n"
-            f"请先输入型号，再输入数量。\n"
-            f"录入完成后会自动跳转下一位。\n"
-            f"发现录错可按 Ctrl+Z 或点'撤回'回退上一步。\n"
-            f"想退出批量：点'退出批量'按钮 或 按 ESC。"
-        )
+            f"批量录入已开始：{first}（1/{total}）\n请先输入型号，再输入数量。\n录入完成后会自动跳转下一位。\n发现录错可按 Ctrl+Z 或点'撤回'回退上一步。\n想退出批量：点'退出批量'按钮 或 按 ESC。")
 
     def do_batch_entry(self):
-        if not self.batch_mode:
-            return
-
+        if not self.batch_mode: return
         person = self.batch_persons[self.batch_index]
         total = len(self.batch_persons)
-
         m = self.txt_model.text().strip()
-        if m:
-            self.batch_model = m
-
+        if m: self.batch_model = m
         if not self.batch_model:
             self.log.setText("请先输入型号")
             self.txt_model.setFocus()
             return
-
         qty = self.txt_qty.text().strip()
         if not qty:
             self.log.setText(f"请输入数量（{person}）")
             return
-
         day = self.txt_day.text().strip()
         if not day:
             self.log.setText("请先填写日期")
@@ -1554,21 +1404,23 @@ class MainWindow(QWidget):
             pass
 
         undo_before = len(self.manager.undo_stack)
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, msg = self.manager.entry(person, day, self.batch_model, qty)
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
-        ok, msg = self.manager.entry(person, day, self.batch_model, qty)
         self.log.setText(msg)
         if not ok:
-            QMessageBox.warning(self, "批量录入失败", f"{person}: {msg}")
+            self._show_msg(QMessageBox.Warning, "批量录入失败", f"{person}: {msg}")
             return
 
         if len(self.manager.undo_stack) > undo_before:
             rec = self.manager.undo_stack[-1]
-            self.batch_history.append({
-                "person": person,
-                "model": self.batch_model,
-                "qty": qty,
-                "record": rec,
-            })
+            self.batch_history.append({"person": person, "model": self.batch_model, "qty": qty, "record": rec})
 
         try:
             self.settings.setValue("last_day", day)
@@ -1577,7 +1429,6 @@ class MainWindow(QWidget):
             pass
 
         self.txt_qty.clear()
-
         self.batch_index += 1
 
         if self.batch_index >= total:
@@ -1592,10 +1443,7 @@ class MainWindow(QWidget):
             self.txt_model.setPlaceholderText("")
             self.txt_qty.setFocus()
             self.log.setText(f"批量录入完成：{done_model}，共 {done_count} 人")
-            QMessageBox.information(
-                self, "批量录入",
-                f"全部完成！\n型号：{done_model}\n共 {done_count} 人"
-            )
+            self._show_msg(QMessageBox.Information, "批量录入", f"全部完成！\n型号：{done_model}\n共 {done_count} 人")
         else:
             next_person = self.batch_persons[self.batch_index]
             try:
@@ -1604,31 +1452,27 @@ class MainWindow(QWidget):
                 self.refresh_sheets()
             except Exception as e:
                 print("切换 sheet 失败:", e)
-
             self.txt_qty.setFocus()
             idx = self.batch_index + 1
             self.log.setText(
-                f"批量录入：{self.batch_model} - {next_person}（{idx}/{total}）\n"
-                f"请输入数量；Ctrl+Z 撤回上一步；ESC 退出批量"
-            )
+                f"批量录入：{self.batch_model} - {next_person}（{idx}/{total}）\n请输入数量；Ctrl+Z 撤回上一步；ESC 退出批量")
 
     def do_batch_undo(self):
         if not self.batch_history:
-            QMessageBox.information(self, "批量回退",
-                                    "没有可回退的操作（已经是第一步）")
+            self._show_msg(QMessageBox.Information, "批量回退", "没有可回退的操作（已经是第一步）")
             return
-
         item = self.batch_history.pop()
         person = item["person"]
         rec = item["record"]
 
+        self.setEnabled(False)
+        QApplication.processEvents()
         try:
             wb = self.conn.get_active_workbook()
             if wb is None:
-                QMessageBox.warning(self, "批量回退", "未检测到工作簿")
+                self._show_msg(QMessageBox.Warning, "批量回退", "未检测到工作簿")
                 return
             sh = wb.Sheets(rec["sheet_name"])
-
             if rec["inserted"]:
                 sh.Columns(rec["col"]).Delete()
             else:
@@ -1636,16 +1480,13 @@ class MainWindow(QWidget):
                 is_empty = (old is None)
                 if not is_empty:
                     try:
-                        if abs(float(old)) < 1e-9:
-                            is_empty = True
+                        if abs(float(old)) < 1e-9: is_empty = True
                     except (ValueError, TypeError):
                         is_empty = False
-
                 if is_empty:
                     sh.Cells(rec["row"], rec["col"]).ClearContents()
                 else:
                     sh.Cells(rec["row"], rec["col"]).Value = old
-
             try:
                 self.manager._update_total(sh, wb.Name)
             except Exception:
@@ -1654,18 +1495,20 @@ class MainWindow(QWidget):
                 wb.Save()
             except Exception:
                 pass
-
             if self.manager.undo_stack and self.manager.undo_stack[-1] is rec:
                 self.manager.undo_stack.pop()
         except Exception as e:
-            QMessageBox.warning(self, "批量回退", f"恢复失败：{e}")
+            self._show_msg(QMessageBox.Warning, "批量回退", f"恢复失败：{e}")
             return
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
         try:
             self.batch_index = self.batch_persons.index(person)
         except ValueError:
             self.batch_index = max(0, self.batch_index - 1)
-
         try:
             self.conn.activate_sheet(person)
             self._last_sheet = person
@@ -1675,13 +1518,9 @@ class MainWindow(QWidget):
 
         self.txt_qty.clear()
         self.txt_qty.setFocus()
-
         total = len(self.batch_persons)
         idx = self.batch_index + 1
-        self.log.setText(
-            f"已回退到：{person}（{idx}/{total}）\n"
-            f"型号：{self.batch_model}，请重新输入数量"
-        )
+        self.log.setText(f"已回退到：{person}（{idx}/{total}）\n型号：{self.batch_model}，请重新输入数量")
 
     def _cancel_batch(self):
         self.batch_mode = False
@@ -1697,12 +1536,9 @@ class MainWindow(QWidget):
     def do_select_price_file(self):
         last = self.settings.value("price_file", "", type=str)
         init_dir = os.path.dirname(last) if last else ""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择单价表文件", init_dir,
-            "Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)"
-        )
-        if not path:
-            return
+        path, _ = QFileDialog.getOpenFileName(self, "选择单价表文件", init_dir,
+                                              "Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)")
+        if not path: return
         self.settings.setValue("price_file", path)
         self.price_table.set_path(path)
         ok = self.price_table.load()
@@ -1710,16 +1546,14 @@ class MainWindow(QWidget):
             self._scanned_workbooks.clear()
             self.log.setText(f"单价表已加载（{len(self.price_table.data)} 个型号）")
             wb_name = self.conn.get_workbook_name()
-            if "干磨" in wb_name:
-                self.try_scan_prices()
+            if "干磨" in wb_name: self.try_scan_prices()
         else:
             self.log.setText(f"单价表加载失败：{self.price_table.error}")
 
     def do_reload_price_file(self):
         path = self.settings.value("price_file", "", type=str)
         if not path:
-            QMessageBox.warning(self, "提示",
-                                "还没设置单价表路径，请先点'单价表'按钮选择文件。")
+            self._show_msg(QMessageBox.Warning, "提示", "还没设置单价表路径，请先点'单价表'按钮选择文件。")
             return
         self.price_table.set_path(path)
         ok = self.price_table.load()
@@ -1727,26 +1561,19 @@ class MainWindow(QWidget):
             self._scanned_workbooks.clear()
             self.log.setText(f"单价表已重新加载（{len(self.price_table.data)} 个型号）")
             wb_name = self.conn.get_workbook_name()
-            if "干磨" in wb_name:
-                self.try_scan_prices()
+            if "干磨" in wb_name: self.try_scan_prices()
         else:
             self.log.setText(f"单价表加载失败：{self.price_table.error}")
 
     def try_scan_prices(self):
         wb_name = self.conn.get_workbook_name()
-        if "干磨" not in wb_name:
-            return
-        if wb_name in self._scanned_workbooks:
-            return
-        if not self.price_table.loaded:
-            return
+        if "干磨" not in wb_name or wb_name in self._scanned_workbooks or not self.price_table.loaded: return
         self._scanned_workbooks.add(wb_name)
         missing = self.manager.scan_and_fill_prices(wb_name)
         self._missing_prices = missing
         if missing:
             preview = "、".join(missing[:5])
-            if len(missing) > 5:
-                preview += f" 等 {len(missing)} 个"
+            if len(missing) > 5: preview += f" 等 {len(missing)} 个"
             self.log.setText(f"未找到单价：{preview}")
         else:
             self.log.setText("单价已全部检查并填充")
@@ -1754,19 +1581,16 @@ class MainWindow(QWidget):
     def do_check_missing_prices(self):
         wb_name = self.conn.get_workbook_name()
         if "干磨" not in wb_name:
-            QMessageBox.warning(self, "提示", f"当前工作簿不是干磨表：{wb_name}")
+            self._show_msg(QMessageBox.Warning, "提示", f"当前工作簿不是干磨表：{wb_name}")
             return
-
         missing_info, err = self.manager.find_missing_prices(wb_name)
         if err:
-            QMessageBox.warning(self, "检查缺失单价", err)
+            self._show_msg(QMessageBox.Warning, "检查缺失单价", err)
             return
         if not missing_info:
-            QMessageBox.information(self, "检查缺失单价",
-                                    "所有型号都能在单价表中找到单价。")
+            self._show_msg(QMessageBox.Information, "检查缺失单价", "所有型号都能在单价表中找到单价。")
             self.log.setText("检查缺失单价：无缺失")
             return
-
         lines = []
         for model, occurrences in missing_info.items():
             if occurrences:
@@ -1780,42 +1604,20 @@ class MainWindow(QWidget):
                 lines.append(f"· {model}  →  {'；'.join(parts)}")
             else:
                 lines.append(f"· {model}  →  未找到是谁填的")
-
         msg = f"以下 {len(missing_info)} 个型号没有单价：\n\n" + "\n".join(lines)
-
-        if len(msg) > 4000:
-            msg = msg[:4000] + "\n\n……（内容过多，已截断，请补齐单价后重新检查）"
-
-        QMessageBox.information(self, "检查缺失单价", msg)
+        if len(msg) > 4000: msg = msg[:4000] + "\n\n……（内容过多，已截断，请补齐单价后重新检查）"
+        self._show_msg(QMessageBox.Information, "检查缺失单价", msg)
         self.log.setText(f"缺失单价：共 {len(missing_info)} 个型号")
-
-    def try_verify_formulas(self):
-        wb_name = self.conn.get_workbook_name()
-        if not wb_name:
-            return
-        if wb_name in self._verified_workbooks:
-            return
-        self._verified_workbooks.add(wb_name)
-        fixes = self.manager.verify_current_workbook()
-        if fixes:
-            preview = "、".join(fixes[:5])
-            if len(fixes) > 5:
-                preview += f" 等 {len(fixes)} 处"
-            self.log.setText(f"已修正公式：{preview}")
-        else:
-            self.log.setText("公式检查完成，无修正")
 
     def do_verify_formulas(self):
         if self.conn.app is None:
-            QMessageBox.warning(self, "提示", "未连接到 WPS，请先打开需要检查的表格。")
+            self._show_msg(QMessageBox.Warning, "提示", "未连接到 WPS，请先打开需要检查的表格。")
             return
-
         try:
             all_wbs = [wb for wb in self.conn.app.Workbooks]
         except Exception as e:
-            QMessageBox.warning(self, "提示", f"获取已打开工作簿失败：{e}")
+            self._show_msg(QMessageBox.Warning, "提示", f"获取已打开工作簿失败：{e}")
             return
-
         target_wbs = []
         wb_names = []
         for wb in all_wbs:
@@ -1823,92 +1625,88 @@ class MainWindow(QWidget):
             if "干磨" in name or "修帽子" in name:
                 target_wbs.append(wb)
                 wb_names.append(name)
-
         if not target_wbs:
-            QMessageBox.information(self, "提示", "当前没有打开任何需要检查的工作簿（名称包含'干磨'或'修帽子'）。")
+            self._show_msg(QMessageBox.Information, "提示",
+                           "当前没有打开任何需要检查的工作簿（名称包含'干磨'或'修帽子'）。")
             return
-
         preview = "、\n".join(wb_names[:5])
-        if len(wb_names) > 5:
-            preview += f" 等 {len(wb_names)} 个文件"
-
-        reply = QMessageBox.question(
-            self,
-            "批量检查修正公式",
-            f"即将检查以下 {len(target_wbs)} 个工作簿的所有 sheet 公式：\n\n{preview}\n\n是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        if reply != QMessageBox.Yes:
-            return
+        if len(wb_names) > 5: preview += f" 等 {len(wb_names)} 个文件"
+        reply = self._show_msg(QMessageBox.Question, "批量检查修正公式",
+                               f"即将检查以下 {len(target_wbs)} 个工作簿的所有 sheet 公式：\n\n{preview}\n\n是否继续？",
+                               QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes: return
 
         total_fixes = []
-        for wb in target_wbs:
-            try:
-                fixes = self.manager.verify_workbook(wb)
-                if fixes:
-                    for f in fixes:
-                        total_fixes.append(f"[{wb.Name}] {f}")
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"检查工作簿 {wb.Name} 时出错：{e}")
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            for wb in target_wbs:
+                try:
+                    fixes = self.manager.verify_workbook(wb)
+                    if fixes:
+                        for f in fixes: total_fixes.append(f"[{wb.Name}] {f}")
+                except Exception as e:
+                    print(f"检查工作簿 {wb.Name} 时出错：{e}")
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
         if total_fixes:
             preview = "\n".join(total_fixes[:15])
-            if len(total_fixes) > 15:
-                preview += f"\n... 等共 {len(total_fixes)} 处"
-
-            QMessageBox.information(
-                self,
-                "检查修正完成",
-                f"全部检查完成，共修正 {len(total_fixes)} 处公式：\n\n{preview}"
-            )
+            if len(total_fixes) > 15: preview += f"\n... 等共 {len(total_fixes)} 处"
+            self._show_msg(QMessageBox.Information, "检查修正完成",
+                           f"全部检查完成，共修正 {len(total_fixes)} 处公式：\n\n{preview}")
             self.log.setText(f"已修正 {len(target_wbs)} 个文件的公式，共计 {len(total_fixes)} 处")
         else:
-            QMessageBox.information(self, "检查修正完成", "检查完毕，所有公式均符合规范，无需修正。")
+            self._show_msg(QMessageBox.Information, "检查修正完成", "检查完毕，所有公式均符合规范，无需修正。")
             self.log.setText(f"已检查 {len(target_wbs)} 个文件，无修正")
-
         self.refresh_sheets()
 
     def do_check_margins(self):
-        ok, non_compliant, err = self.manager.check_and_fix_margins(fix=False)
-        if not ok:
-            QMessageBox.warning(self, "检查排版", err)
-            return
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, non_compliant, err = self.manager.check_and_fix_margins(fix=False)
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
+        if not ok:
+            self._show_msg(QMessageBox.Warning, "检查排版", err)
+            return
         if not non_compliant:
-            QMessageBox.information(self, "检查排版",
-                                    "当前工作簿所有 sheet 的排版均符合要求：\n"
-                                    "· 左边距 2cm，其余边距 1cm\n"
-                                    "· 横向打印")
+            self._show_msg(QMessageBox.Information, "检查排版",
+                           "当前工作簿所有 sheet 的排版均符合要求：\n· 左边距 2cm，其余边距 1cm\n· 横向打印")
             self.log.setText("检查排版：全部符合要求")
             return
-
         preview = "、".join(non_compliant[:10])
-        if len(non_compliant) > 10:
-            preview += f" 等 {len(non_compliant)} 个"
+        if len(non_compliant) > 10: preview += f" 等 {len(non_compliant)} 个"
+        reply = self._show_msg(QMessageBox.Question, "检查排版",
+                               f"发现以下 {len(non_compliant)} 个 sheet 的排版不符合要求：\n{preview}\n\n是否统一修改为（左边距 2cm，右/上/下边距 1cm）且【横向打印】？",
+                               QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes: return
 
-        reply = QMessageBox.question(
-            self, "检查排版",
-            f"发现以下 {len(non_compliant)} 个 sheet 的排版不符合要求：\n{preview}\n\n"
-            f"是否统一修改为（左边距 2cm，右/上/下边距 1cm）且【横向打印】？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        if reply != QMessageBox.Yes:
-            return
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, _, err2 = self.manager.check_and_fix_margins(fix=True)
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
-        ok, _, err2 = self.manager.check_and_fix_margins(fix=True)
         if ok:
             try:
                 wb = self.conn.get_active_workbook()
-                if wb:
-                    wb.Save()
+                if wb: wb.Save()
             except Exception:
                 pass
-            QMessageBox.information(self, "检查排版", err2)
+            self._show_msg(QMessageBox.Information, "检查排版", err2)
             self.log.setText(err2)
         else:
-            QMessageBox.warning(self, "修正失败", err2)
+            self._show_msg(QMessageBox.Warning, "修正失败", err2)
 
     def on_opacity_changed(self, value):
         self._apply_opacity(value)
@@ -1932,24 +1730,15 @@ class MainWindow(QWidget):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.KeyPress:
             key = event.key()
-            if (self.batch_mode
-                    and key == Qt.Key_Z
-                    and event.modifiers() == Qt.ControlModifier):
+            if self.batch_mode and key == Qt.Key_Z and event.modifiers() == Qt.ControlModifier:
                 self.do_undo()
                 return True
-
             if self.batch_mode and key == Qt.Key_Escape:
-                reply = QMessageBox.question(
-                    self, "退出批量录入",
-                    f"当前进度：{self.batch_index + 1}/{len(self.batch_persons)}\n"
-                    f"已录入的会保留，未录入的跳过。\n\n是否退出批量录入？",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
-                )
-                if reply == QMessageBox.Yes:
-                    self._cancel_batch()
+                reply = self._show_msg(QMessageBox.Question, "退出批量录入",
+                                       f"当前进度：{self.batch_index + 1}/{len(self.batch_persons)}\n已录入的会保留，未录入的跳过。\n\n是否退出批量录入？",
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.Yes: self._cancel_batch()
                 return True
-
             if obj is self.txt_day:
                 if key == Qt.Key_Down:
                     self.txt_model.setFocus()
@@ -1968,29 +1757,20 @@ class MainWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def monitor_wps(self):
-        if self.conn is None:
-            return
-        if self._restoring:
-            return
-        if self.batch_mode:
-            return
-
+        if self.conn is None or self._restoring or self.batch_mode: return
         if self.conn.app is None:
             self.conn.connect()
             return
-
         try:
             wb = self.conn.get_active_workbook()
         except Exception:
             return
-
         if wb is None:
             if self._last_workbook != "":
                 self._last_workbook = ""
                 self._last_sheet = ""
                 self.lbl_status.setText("当前工作簿：-    当前人员：-")
             return
-
         try:
             wb_name = wb.Name
             active = self.conn.get_active_sheet_name()
@@ -2004,10 +1784,7 @@ class MainWindow(QWidget):
             self.refresh_sheets()
             QTimer.singleShot(1500, self.try_scan_prices)
             if last_sheet:
-                QTimer.singleShot(
-                    500,
-                    lambda w=wb_name, s=last_sheet: self._delayed_restore(w, s)
-                )
+                QTimer.singleShot(500, lambda w=wb_name, s=last_sheet: self._delayed_restore(w, s))
             return
 
         if active != self._last_sheet:
@@ -2019,31 +1796,25 @@ class MainWindow(QWidget):
             self.refresh_sheets()
 
     def _delayed_restore(self, wb_name, sheet_name):
-        if self._restoring:
-            return
-        if self.batch_mode:
-            return
+        if self._restoring or self.batch_mode: return
         try:
             current_wb = self.conn.get_workbook_name()
         except Exception:
             return
-        if current_wb != wb_name:
-            return
+        if current_wb != wb_name: return
         try:
             all_sheets = self.conn.get_sheet_names()
         except Exception:
             return
-        if sheet_name not in all_sheets:
-            return
+        if sheet_name not in all_sheets: return
         try:
             active = self.conn.get_active_sheet_name()
         except Exception:
             return
         first_sheet = all_sheets[0] if all_sheets else ""
-        if active != first_sheet and active != sheet_name:
-            return
-        if active == sheet_name:
-            return
+        if active != first_sheet and active != sheet_name: return
+        if active == sheet_name: return
+
         self._restoring = True
         try:
             self.conn.activate_sheet(sheet_name)
@@ -2059,8 +1830,7 @@ class MainWindow(QWidget):
         self.refresh_sheets()
 
     def refresh_sheets(self):
-        if self.conn.app is None:
-            self.conn.connect()
+        if self.conn.app is None: self.conn.connect()
         wb = self.conn.get_active_workbook()
         if wb is None:
             self.conn.connect()
@@ -2085,31 +1855,25 @@ class MainWindow(QWidget):
 
     def on_sheet_activated(self, index):
         text = self.cbo_sheet.currentText().strip()
-        if not text:
-            return
+        if not text: return
         all_sheets = [self.cbo_sheet.itemText(i) for i in range(self.cbo_sheet.count())]
-        if text in all_sheets:
-            self._switch_to_sheet(text)
+        if text in all_sheets: self._switch_to_sheet(text)
 
     def on_wheel_navigate(self, direction):
-        if direction == 0:
-            return
+        if direction == 0: return
         try:
             active = self.conn.get_active_sheet_name()
         except Exception:
             return
         names = [self.cbo_sheet.itemText(i) for i in range(self.cbo_sheet.count())]
-        if not names:
-            return
+        if not names: return
         if active not in names:
             self.refresh_sheets()
             names = [self.cbo_sheet.itemText(i) for i in range(self.cbo_sheet.count())]
-            if active not in names:
-                return
+            if active not in names: return
         cur_idx = names.index(active)
         new_idx = cur_idx + direction
-        if new_idx < 0 or new_idx >= len(names):
-            return
+        if new_idx < 0 or new_idx >= len(names): return
         self._switch_to_sheet(names[new_idx])
 
     def _switch_to_sheet(self, name):
@@ -2131,8 +1895,7 @@ class MainWindow(QWidget):
 
     def _get_current_sheet(self):
         active = self.conn.get_active_sheet_name()
-        if active:
-            return active
+        if active: return active
         text = self.cbo_sheet.currentText().strip()
         return text if text else None
 
@@ -2143,25 +1906,24 @@ class MainWindow(QWidget):
 
         sheet = self._get_current_sheet()
         if not sheet:
-            QMessageBox.warning(self, "提示", "未检测到 WPS 活动 sheet。")
+            self._show_msg(QMessageBox.Warning, "提示", "未检测到 WPS 活动 sheet。")
             return
         current_model = self.txt_model.text().strip()
         current_qty = self.txt_qty.text().strip()
 
         self.txt_model.setEnabled(False)
         self.txt_qty.setEnabled(False)
+        self.setEnabled(False)
         QApplication.processEvents()
 
         try:
-            ok, msg = self.manager.entry(
-                sheet,
-                self.txt_day.text(),
-                current_model,
-                current_qty
-            )
+            ok, msg = self.manager.entry(sheet, self.txt_day.text(), current_model, current_qty)
         finally:
+            self.setEnabled(True)
+            self.activateWindow()
             self.txt_model.setEnabled(True)
             self.txt_qty.setEnabled(True)
+            QApplication.processEvents()
 
         self.log.setText(msg)
         if ok:
@@ -2181,15 +1943,14 @@ class MainWindow(QWidget):
             self.refresh_sheets()
             QTimer.singleShot(50, self._refocus)
         else:
-            QMessageBox.warning(self, "录入失败", msg)
+            self._show_msg(QMessageBox.Warning, "录入失败", msg)
 
     def do_undo(self):
         if self.batch_mode and self.batch_history:
             self.do_batch_undo()
             return
-
         if not self.manager.undo_stack:
-            QMessageBox.information(self, "撤回", "没有可撤回的操作。")
+            self._show_msg(QMessageBox.Information, "撤回", "没有可撤回的操作。")
             return
 
         item = self.manager.undo_stack[-1]
@@ -2205,7 +1966,6 @@ class MainWindow(QWidget):
             return res
 
         col_letter = _col_letter(col)
-
         if item["inserted"]:
             action_desc = f"【新插入列】：{sheet_name} 表的 {col_letter} 列"
         else:
@@ -2213,29 +1973,31 @@ class MainWindow(QWidget):
             new_val = item.get("new_value") if item.get("new_value") is not None else "空"
             action_desc = f"【数据修改】：{sheet_name} 表的 {col_letter}{row} 单元格，将“{new_val}”恢复为“{old_val}”"
 
-        reply = QMessageBox.question(
-            self, "撤回确认",
-            f"即将撤回以下操作，是否继续？\n\n{action_desc}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        if reply != QMessageBox.Yes:
-            return
+        reply = self._show_msg(QMessageBox.Question, "撤回确认", f"即将撤回以下操作，是否继续？\n\n{action_desc}",
+                               QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes: return
 
-        ok, msg = self.manager.undo()
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, msg = self.manager.undo()
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
+
         self.log.setText(msg)
         if not ok:
-            QMessageBox.warning(self, "撤回失败", msg)
+            self._show_msg(QMessageBox.Warning, "撤回失败", msg)
         else:
             self.refresh_sheets()
 
     def do_redo(self):
         if self.batch_mode:
-            QMessageBox.warning(self, "提示", "批量录入模式下暂不支持重做。")
+            self._show_msg(QMessageBox.Warning, "提示", "批量录入模式下暂不支持重做。")
             return
-
         if not self.manager.redo_stack:
-            QMessageBox.information(self, "重做", "没有可重做的操作。")
+            self._show_msg(QMessageBox.Information, "重做", "没有可重做的操作。")
             return
 
         item = self.manager.redo_stack[-1]
@@ -2251,35 +2013,35 @@ class MainWindow(QWidget):
             return res
 
         col_letter = _col_letter(col)
-
         if item["inserted"]:
             action_desc = f"【重新插入列】：{sheet_name} 表的 {col_letter} 列"
         else:
             new_val = item.get("new_value") if item.get("new_value") is not None else "空"
             action_desc = f"【重新写入】：{sheet_name} 表的 {col_letter}{row} 单元格，将改回“{new_val}”"
 
-        reply = QMessageBox.question(
-            self, "回退确认",
-            f"即将回退以下操作，是否继续？\n\n{action_desc}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
+        reply = self._show_msg(QMessageBox.Question, "回退确认", f"即将回退以下操作，是否继续？\n\n{action_desc}",
+                               QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes: return
 
-        if reply != QMessageBox.Yes:
-            return
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, msg = self.manager.redo()
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
-        ok, msg = self.manager.redo()
         self.log.setText(msg)
         if not ok:
-            QMessageBox.warning(self, "重做失败", msg)
+            self._show_msg(QMessageBox.Warning, "重做失败", msg)
         else:
             self.refresh_sheets()
 
     def do_multi(self):
         names = self.conn.get_sheet_names()
         current_day = self.txt_day.text().strip()
-        dlg = MultiDialog(names, self.settings, self.manager,
-                          default_day=current_day, parent=self)
+        dlg = MultiDialog(names, self.settings, self.manager, default_day=current_day, parent=self)
         dlg.exec()
         self.refresh_sheets()
 
@@ -2289,124 +2051,122 @@ class MainWindow(QWidget):
             ok, msg = self.manager.add_person(name.strip())
             self.log.setText(msg)
             if not ok:
-                QMessageBox.warning(self, "新增人员", msg)
+                self._show_msg(QMessageBox.Warning, "新增人员", msg)
             else:
                 self.refresh_sheets()
 
     def do_clean_empty_sheets(self):
         empty, err = self.manager.find_empty_sheets()
         if err:
-            QMessageBox.warning(self, "清理离职表", err)
+            self._show_msg(QMessageBox.Warning, "清理离职表", err)
             return
         if not empty:
-            QMessageBox.information(self, "清理离职表",
-                                    "所有 sheet 都有数据，无需清理。")
+            self._show_msg(QMessageBox.Information, "清理离职表", "所有 sheet 都有数据，无需清理。")
             self.log.setText("清理离职表：无空表")
             return
-
         preview = "\n".join(f"· {n}" for n in empty[:30])
-        if len(empty) > 30:
-            preview += f"\n…… 共 {len(empty)} 个"
-
-        msg = (
-            f"以下 {len(empty)} 个 sheet 从 3 行到 33 行完全没有数据：\n\n"
-            f"{preview}\n\n"
-            f"是否删除这些 sheet？删除后无法自动恢复。"
-        )
-
-        reply = QMessageBox.question(
-            self, "清理离职表", msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        if len(empty) > 30: preview += f"\n…… 共 {len(empty)} 个"
+        msg = f"以下 {len(empty)} 个 sheet 从 3 行到 33 行完全没有数据：\n\n{preview}\n\n是否删除这些 sheet？删除后无法自动恢复。"
+        reply = self._show_msg(QMessageBox.Question, "清理离职表", msg, QMessageBox.Yes | QMessageBox.No,
+                               QMessageBox.No)
         if reply != QMessageBox.Yes:
             self.log.setText("已取消清理。")
             return
 
-        ok, msg2 = self.manager.delete_sheets(empty)
-
-        if ok:
-            try:
-                wb = self.conn.get_active_workbook()
-                if wb:
-                    wb.Save()
-            except Exception as e:
-                QMessageBox.warning(self, "保存失败", f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, msg2 = self.manager.delete_sheets(empty)
+            if ok:
+                try:
+                    wb = self.conn.get_active_workbook()
+                    if wb: wb.Save()
+                except Exception as e:
+                    self._show_msg(QMessageBox.Warning, "保存失败",
+                                   f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
         self.log.setText(msg2)
         if ok:
-            QMessageBox.information(self, "清理离职表", msg2)
+            self._show_msg(QMessageBox.Information, "清理离职表", msg2)
             self.refresh_sheets()
 
     def do_clean_empty(self):
         items, err = self.manager.clean_empty_columns_all()
         if err:
-            QMessageBox.warning(self, "清理空列", err)
+            self._show_msg(QMessageBox.Warning, "清理空列", err)
             return
         if not items:
-            QMessageBox.information(self, "清理空列", "没有 34 行为 0 的型号列，无需清理。")
+            self._show_msg(QMessageBox.Information, "清理空列", "没有 34 行为 0 的型号列，无需清理。")
             return
-
         grouped = {}
-        for it in items:
-            grouped.setdefault(it["sheet"], []).append(it["name"])
-
+        for it in items: grouped.setdefault(it["sheet"], []).append(it["name"])
         lines = []
         for sheet_name, names in grouped.items():
             lines.append(f"【{sheet_name}】共 {len(names)} 列")
-            for n in names:
-                lines.append(f"    · {n}")
+            for n in names: lines.append(f"    · {n}")
             lines.append("")
-
         preview = "\n".join(lines)
-
         total = len(items)
         sheet_count = len(grouped)
-
         dlg = CleanEmptyDialog(preview, total, sheet_count, parent=self)
         if dlg.exec() != QDialog.Accepted:
             self.log.setText("已取消清理。")
             return
 
-        ok, msg2 = self.manager.do_delete_columns_batch(items)
-
-        if ok:
-            try:
-                wb = self.conn.get_active_workbook()
-                if wb:
-                    wb.Save()
-            except Exception as e:
-                QMessageBox.warning(self, "保存失败", f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, msg2 = self.manager.do_delete_columns_batch(items)
+            if ok:
+                try:
+                    wb = self.conn.get_active_workbook()
+                    if wb: wb.Save()
+                except Exception as e:
+                    self._show_msg(QMessageBox.Warning, "保存失败",
+                                   f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
 
         self.log.setText(msg2)
         if not ok:
-            QMessageBox.warning(self, "清理空列", msg2)
+            self._show_msg(QMessageBox.Warning, "清理空列", msg2)
         else:
-            QMessageBox.information(self, "清理空列", msg2)
+            self._show_msg(QMessageBox.Information, "清理空列", msg2)
             self.refresh_sheets()
 
     def do_make_summary(self):
         wb_name = self.conn.get_workbook_name()
         if "修帽子" not in wb_name:
-            QMessageBox.warning(self, "提示", f"当前工作簿不是修帽子表：{wb_name}")
+            self._show_msg(QMessageBox.Warning, "提示", f"当前工作簿不是修帽子表：{wb_name}")
             return
-        reply = QMessageBox.question(
-            self, "修帽子合计统计",
-            "将按 sheet 顺序生成合计，是否继续？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
-            return
-        ok, msg = self.manager.make_summary()
+        reply = self._show_msg(QMessageBox.Question, "修帽子合计统计", "将按 sheet 顺序生成合计，是否继续？",
+                               QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes: return
+
+        self.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ok, msg = self.manager.make_summary()
+        finally:
+            self.setEnabled(True)
+            self.activateWindow()
+            QApplication.processEvents()
+
         self.log.setText(msg)
         if not ok:
-            QMessageBox.warning(self, "修帽子合计统计", msg)
+            self._show_msg(QMessageBox.Warning, "修帽子合计统计", msg)
         else:
             try:
                 self.conn.activate_sheet("合计")
             except Exception as e:
                 print("切换到合计 sheet 失败:", e)
-            QMessageBox.information(self, "修帽子合计统计", msg)
+            self._show_msg(QMessageBox.Information, "修帽子合计统计", msg)
             self.refresh_sheets()
 
     def do_query_date(self):
@@ -2420,9 +2180,8 @@ class MainWindow(QWidget):
     def do_clear_day(self):
         names = self.conn.get_sheet_names()
         if not names:
-            QMessageBox.warning(self, "提示", "当前工作簿没有可用的人员 sheet。")
+            self._show_msg(QMessageBox.Warning, "提示", "当前工作簿没有可用的人员 sheet。")
             return
-
         dlg = QDialog(self)
         dlg.setWindowTitle("清空某日数据")
         dlg.resize(320, 400)
@@ -2431,34 +2190,34 @@ class MainWindow(QWidget):
         txt_day = QLineEdit()
         txt_day.setPlaceholderText("如 27")
         layout.addWidget(txt_day)
-
         layout.addWidget(QLabel("勾选要清空的人员（可多选）："))
         lst = QListWidget()
         lst.setSelectionMode(QListWidget.MultiSelection)
-        for name in names:
-            lst.addItem(QListWidgetItem(name))
+        for name in names: lst.addItem(QListWidgetItem(name))
         layout.addWidget(lst)
-
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
         layout.addWidget(btns)
-
         if dlg.exec() == QDialog.Accepted:
             day = txt_day.text().strip()
             selected = [i.text() for i in lst.selectedItems()]
             if not day or not selected:
-                QMessageBox.warning(self, "提示", "日期和人员不能为空。")
+                self._show_msg(QMessageBox.Warning, "提示", "日期和人员不能为空。")
                 return
-
-            reply = QMessageBox.question(self, "确认",
-                                         f"确定要清空 {day} 号这 {len(selected)} 人的所有工序数据吗？（不可撤销）",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply != QMessageBox.Yes:
-                return
-
-            ok, msg = self.manager.clear_day_data(selected, day)
-            QMessageBox.information(self, "完成", msg)
+            reply = self._show_msg(QMessageBox.Question, "确认",
+                                   f"确定要清空 {day} 号这 {len(selected)} 人的所有工序数据吗？（不可撤销）",
+                                   QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes: return
+            self.setEnabled(False)
+            QApplication.processEvents()
+            try:
+                ok, msg = self.manager.clear_day_data(selected, day)
+            finally:
+                self.setEnabled(True)
+                self.activateWindow()
+                QApplication.processEvents()
+            self._show_msg(QMessageBox.Information, "完成", msg)
             self.refresh_sheets()
 
     def do_replace_model(self):
@@ -2466,39 +2225,39 @@ class MainWindow(QWidget):
         dlg.setWindowTitle("修改表头型号")
         dlg.resize(300, 180)
         layout = QFormLayout(dlg)
-
         edit_old = QLineEdit()
         edit_old.setPlaceholderText("如 22.5")
         layout.addRow("旧型号：", edit_old)
-
         edit_new = QLineEdit()
         edit_new.setPlaceholderText("如 225")
         layout.addRow("新型号：", edit_new)
-
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
         layout.addWidget(btns)
-
         if dlg.exec() == QDialog.Accepted:
             old_m = edit_old.text().strip()
             new_m = edit_new.text().strip()
             if not old_m or not new_m:
-                QMessageBox.warning(self, "提示", "不能为空。")
+                self._show_msg(QMessageBox.Warning, "提示", "不能为空。")
                 return
-
-            reply = QMessageBox.question(self, "确认", f"确定将工作簿中所有的「{old_m}」替换为「{new_m}」吗？",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply != QMessageBox.Yes:
-                return
-
-            ok, msg = self.manager.replace_model_name(old_m, new_m)
+            reply = self._show_msg(QMessageBox.Question, "确认", f"确定将工作簿中所有的「{old_m}」替换为「{new_m}」吗？",
+                                   QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes: return
+            self.setEnabled(False)
+            QApplication.processEvents()
+            try:
+                ok, msg = self.manager.replace_model_name(old_m, new_m)
+            finally:
+                self.setEnabled(True)
+                self.activateWindow()
+                QApplication.processEvents()
             if ok:
-                QMessageBox.information(self, "完成", msg)
+                self._show_msg(QMessageBox.Information, "完成", msg)
                 self.refresh_sheets()
                 self._scan_files()
             else:
-                QMessageBox.warning(self, "失败", msg)
+                self._show_msg(QMessageBox.Warning, "失败", msg)
 
     def closeEvent(self, event):
         try:
