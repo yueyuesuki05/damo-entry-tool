@@ -188,11 +188,7 @@ class WPSConnector:
                 print("清理多余行失败:", e)
 
     def insert_column(self, sh, col):
-        try:
-            sh.Activate()
-        except Exception:
-            pass
-
+        # 记录左列宽度
         left_width = None
         if col > 2:
             try:
@@ -200,34 +196,14 @@ class WPSConnector:
             except Exception:
                 pass
 
-        inserted_ok = False
+        # 1. 执行插入
         try:
             sh.Columns(col).Insert(Shift=-4161)
-            inserted_ok = True
         except Exception as e:
-            print("第一次插入失败:", e)
+            print("插入列失败:", e)
+            return False
 
-        if not inserted_ok:
-            print("清理 UsedRange 后重试")
-            self._clean_used_range(sh)
-            try:
-                sh.Columns(col).Insert(Shift=-4161)
-                inserted_ok = True
-            except Exception as e:
-                print("清理后仍失败:", e)
-                return False
-
-        if col > 2:
-            try:
-                left_letter = self._col_letter(col - 1)
-                new_letter = self._col_letter(col)
-                sh.Range(f"{left_letter}1:{left_letter}37").Copy(
-                    sh.Range(f"{new_letter}1:{new_letter}37")
-                )
-                sh.Range(f"{new_letter}3:{new_letter}37").ClearContents()
-            except Exception as e:
-                print("复制格式失败:", e)
-
+        # 2. 设置列宽和边框（放弃耗时的 Copy 复制格式，直接秒设）
         if left_width is not None:
             try:
                 sh.Columns(col).ColumnWidth = left_width
@@ -239,32 +215,23 @@ class WPSConnector:
         xlLineStyleNone = -4142
 
         try:
+            # 居中
             rng_center = sh.Range(sh.Cells(2, col), sh.Cells(37, col))
             rng_center.HorizontalAlignment = xlCenter
             rng_center.VerticalAlignment = xlCenter
-        except Exception as e:
-            print("设置居中失败:", e)
-
-        try:
+            # 边框（2-33行有线框）
             rng_border = sh.Range(sh.Cells(2, col), sh.Cells(33, col))
             for edge in [7, 8, 9, 10, 11, 12]:
                 rng_border.Borders(edge).LineStyle = xlContinuous
-        except Exception as e:
-            print("设置边框失败:", e)
-
-        try:
+            # 34-37行无线框
             rng_noborder = sh.Range(sh.Cells(34, col), sh.Cells(37, col))
             for edge in [7, 8, 9, 10, 11, 12]:
                 rng_noborder.Borders(edge).LineStyle = xlLineStyleNone
-        except Exception as e:
-            print("清除34~37行边框失败:", e)
-
-        try:
+            # 补回33行下边框
             sh.Cells(33, col).Borders(9).LineStyle = xlContinuous
-        except Exception as e:
-            print("补回33行下边框失败:", e)
+        except Exception:
+            pass
 
-        self._clean_used_range(sh)
         return True
 
     def find_model_column(self, sh, model, normalizer=None):

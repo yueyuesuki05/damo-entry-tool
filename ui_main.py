@@ -1185,7 +1185,7 @@ class MainWindow(QWidget):
         else:
             self.log.setText("提示：点击'单价表'按钮选择单价表文件")
         self.refresh_sheets()
-        self.timer.start(500)
+        self.timer.start(1500)
 
     def build_ui(self):
         layout = QVBoxLayout(self)
@@ -1918,6 +1918,13 @@ class MainWindow(QWidget):
 
         try:
             ok, msg = self.manager.entry(sheet, self.txt_day.text(), current_model, current_qty)
+            # 录入成功后，执行一次静默保存（确保数据不丢）
+            if ok:
+                try:
+                    wb = self.conn.get_active_workbook()
+                    if wb: wb.Save()
+                except Exception:
+                    pass
         finally:
             self.setEnabled(True)
             self.activateWindow()
@@ -2264,10 +2271,20 @@ class MainWindow(QWidget):
             self.timer.stop()
         except Exception:
             pass
+
+        # 【新增】关闭软件前，强制保存当前工作簿，防止数据丢失
+        try:
+            wb = self.conn.get_active_workbook()
+            if wb is not None:
+                wb.Save()
+        except Exception:
+            pass  # 如果用户提前关了 WPS，这里会报错，直接忽略即可
+
         try:
             self.conn.wb = None
         except Exception:
             pass
+
         event.accept()
         try:
             QApplication.instance().quit()

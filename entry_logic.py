@@ -15,7 +15,8 @@ class EntryManager:
         self.conn = connector
         self.price_table = price_table
         self.undo_stack = []
-        self.redo_stack = []  # 重做栈
+        self.redo_stack = []
+        self._model_cache = {}  # <--- 新增：缓存 {sheet_name: {model: col_idx}}
 
     def _is_ganmo(self, wb_name):
         return "干磨" in wb_name
@@ -268,8 +269,7 @@ class EntryManager:
                 pass
 
         wb = self.conn.get_active_workbook()
-        if wb is None:
-            return False, "未检测到活动工作簿，请先在 WPS 中打开文件。"
+        if wb is None: return False, "未检测到活动工作簿，请先在 WPS 中打开文件。"
 
         try:
             wb_name = wb.Name
@@ -277,39 +277,38 @@ class EntryManager:
             return False, "工作簿已失效，请重新打开文件。"
 
         sh = self.conn.get_sheet(sheet_name)
-        if sh is None:
-            return False, f"找不到 sheet：{sheet_name}"
-
-        try:
-            sh.Activate()
-        except Exception:
-            pass
+        if sh is None: return False, f"找不到 sheet：{sheet_name}"
 
         try:
             day_int = int(day)
-            if day_int < 1 or day_int > 31:
-                raise ValueError
         except Exception:
             return False, "日期必须是 1-31 的整数。"
-
+        if not 1 <= day_int <= 31: return False, "日期必须是 1-31 的整数。"
         row = day_int + 2
 
         qty = self._eval_quantity(expr)
-        if qty is None:
-            return False, f"数量表达式不合法：{expr}"
+        if qty is None: return False, f"数量表达式不合法：{expr}"
 
         model_norm = normalize_model(model)
 
-        col = self.conn.find_model_column(sh, model_norm)
-        inserted = False
+        # === 开启缓存与静默 ===
+        if sheet_name not in self._model_cache:
+            self._model_cache[sheet_name] = {}
 
-        # === 优化：插入列和写入期间关闭刷新，提速并防止画面闪烁 ===
+        cached_col = self._model_cache[sheet_name].get(model_norm, 0)
+        if cached_col:
+            col = cached_col
+        else:
+            col = self.conn.find_model_column(sh, model_norm)
+
+        inserted = False
         try:
             self.conn.app.ScreenUpdating = False
         except Exception:
             pass
 
         try:
+            # --- 新建列逻辑 ---
             if col == 0:
                 display_name = to_chinese_suffix(model_norm)
                 is_time = (display_name == "时间")
@@ -325,14 +324,11 @@ class EntryManager:
                     else:
                         row_vals = (vals,)
                     for v in row_vals:
-                        if v is not None:
-                            existing.append(str(v))
+                        if v is not None: existing.append(str(v))
                 except Exception:
                     pass
 
-                time_col = None
-                if existing and existing[-1] == "时间":
-                    time_col = last_col
+                time_col = last_col if (existing and existing[-1] == "时间") else None
                 insert_end = (time_col - 1) if time_col else last_col
                 pos = find_insert_position(existing[:insert_end - 1], display_name)
                 insert_col = 2 + pos
@@ -340,139 +336,107 @@ class EntryManager:
                     insert_col = time_col
 
                 ok = self.conn.insert_column(sh, insert_col)
-                if not ok:
-                    return False, (
-                        "WPS 拒绝插入新列。请在该 sheet 中按 Ctrl+End，"
-                        "看是否跳到了很远的单元格；如果是，删除该整行/整列，"
-                        "保存并重新打开 WPS，然后再录入。"
-                    )
+                if not ok: return False, "WPS 拒绝插入新列。"
+
                 self.conn.set_header_text_format(sh, insert_col)
                 sh.Cells(2, insert_col).Value = display_name
 
                 col_letter = self._col_letter(insert_col)
-
-                self.conn.write_formula(sh, 34, insert_col,
-                                        f"=SUM({col_letter}3:{col_letter}33)")
+                self.conn.write_formula(sh, 34, insert_col, f"=SUM({col_letter}3:{col_letter}33)")
 
                 if self._is_ganmo(wb_name) and not is_time and not is_sample:
-                    self.conn.write_formula(sh, 36, insert_col,
-                                            f"={col_letter}34*{col_letter}35")
+                    self.conn.write_formula(sh, 36, insert_col, f"={col_letter}34*{col_letter}35")
 
                 col = insert_col
                 inserted = True
                 model_norm = display_name
 
-            old_value = self.conn.read_cell(sh, row, col)
-            if old_value is None:
-                old_value = 0
-            try:
-                old_num = float(old_value)
-            except (ValueError, TypeError):
-                old_num = 0
+                # 新插入了列，清空当前 sheet 的缓存，下次重新读
+                self._model_cache[sheet_name].clear()
 
-            if old_num != 0:
-                self.conn.write_cell(sh, row, col, old_num + qty)
-            else:
-                self.conn.write_cell(sh, row, col, qty)
+            # --- 填入数据 ---
+            old_value = self.conn.read_cell(sh, row, col)
+            old_num = 0
+            if old_value is not None:
+                try:
+                    old_num = float(old_value)
+                except (ValueError, TypeError):
+                    pass
+
+            current_new_val = old_num + qty
+            self.conn.write_cell(sh, row, col, current_new_val)
+
+            # 记录入缓存
+            self._model_cache[sheet_name][model_norm] = col
 
             price_msg = ""
             if self._is_ganmo(wb_name):
                 ok_price, price_msg = self._fill_price_for_col(sh, col, model_norm)
-                if not ok_price and not price_msg:
-                    price_msg = ""
 
+            # 每次录入后，只更新当前列和总计列，不全局刷
             self._update_total(sh, wb_name)
-            current_new_val = old_num + qty if old_num != 0 else qty
 
             extra_info = {"display_name": model_norm} if inserted else {}
-
             self._record_undo(wb_name, sheet_name, row, col, old_value, inserted, new_value=current_new_val,
                               extra=extra_info)
             self.redo_stack.clear()
         finally:
-            # === 恢复屏幕刷新 ===
             try:
                 self.conn.app.ScreenUpdating = True
             except Exception:
                 pass
 
-        self._safe_save(wb)
-
+        # 只负责写入，不负责 Save（加快速度）
         try:
             sh.Cells(row, col).Select()
         except Exception:
             pass
 
         result = f"已录入 {model_norm} = {qty}（{day}日）"
-        if price_msg:
-            result += f"    [{price_msg}]"
+        if price_msg: result += f"    [{price_msg}]"
         return True, result
 
     def _update_total(self, sh, wb_name):
         last_col = self.conn.scan_last_model_col(sh)
-        if last_col < 2:
-            return
+        if last_col < 2: return
 
+        # 简化的表头扫描
         headers = ()
         try:
             rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
             hh = rng.Value
-            if not isinstance(hh, tuple):
-                hh = (hh,)
-            if hh and isinstance(hh[0], tuple):
-                hh = hh[0]
+            if not isinstance(hh, tuple): hh = (hh,)
+            if hh and isinstance(hh[0], tuple): hh = hh[0]
             headers = hh
         except Exception:
             headers = ()
 
-        if self._is_ganmo(wb_name):
-            skip = ("时间", "样品")
-        else:
-            skip = ("时间",)
-
+        skip = ("时间", "样品") if self._is_ganmo(wb_name) else ("时间",)
         effective_last = None
         for i in range(len(headers) - 1, -1, -1):
             h = headers[i]
-            if h is None:
-                continue
+            if h is None: continue
             hs = str(h).strip()
-            if hs == "":
-                continue
-            if hs in skip:
-                continue
+            if hs == "" or hs in skip: continue
             effective_last = 2 + i
             break
 
-        if self._is_ganmo(wb_name):
-            total_row = 37
-            sum_row = 36
-        else:
-            total_row = 35
-            sum_row = 34
+        if effective_last is None: return
 
-        try:
-            start_letter = self._col_letter(1)
-            end_letter = self._col_letter(last_col + 2)
-            sh.Range(f"{start_letter}{total_row}:{end_letter}{total_row}").ClearContents()
-        except Exception as e:
-            print("清空总计失败:", e)
+        total_row = 37 if self._is_ganmo(wb_name) else 35
+        sum_row = 36 if self._is_ganmo(wb_name) else 34
 
-        if effective_last is None:
-            return
-
+        # 不再使用 ClearContents 清空整行，而是直接覆盖写入
         if effective_last == 2:
-            label_col = effective_last
-            formula_col = effective_last + 1
+            label_col, formula_col = effective_last, effective_last + 1
         else:
-            label_col = effective_last - 1
-            formula_col = effective_last
+            label_col, formula_col = effective_last - 1, effective_last
 
         try:
             sh.Cells(total_row, label_col).Value = "总计："
             start = self._col_letter(2)
             end = self._col_letter(effective_last)
-            self.conn.write_formula(sh, total_row, formula_col,
-                                    f"=SUM({start}{sum_row}:{end}{sum_row})")
+            self.conn.write_formula(sh, total_row, formula_col, f"=SUM({start}{sum_row}:{end}{sum_row})")
         except Exception as e:
             print("写总计失败:", e)
 
