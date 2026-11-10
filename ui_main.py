@@ -5,6 +5,7 @@
 
 import os
 import re
+import datetime
 from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -217,7 +218,6 @@ class MultiDialog(QDialog):
         self.txt_total.textChanged.connect(lambda: self.lbl_status.clear())
 
     def _show_msg(self, icon, title, text, buttons=QMessageBox.Ok, default=QMessageBox.Ok):
-        """安全弹窗，防止被置顶主窗口遮挡导致假死"""
         msg = QMessageBox(self)
         msg.setIcon(icon)
         msg.setWindowTitle(title)
@@ -1160,7 +1160,6 @@ class MainWindow(QWidget):
         QTimer.singleShot(0, self._deferred_init)
 
     def _show_msg(self, icon, title, text, buttons=QMessageBox.Ok, default=QMessageBox.Ok):
-        """安全弹窗，防止被置顶主窗口遮挡导致假死"""
         msg = QMessageBox(self)
         msg.setIcon(icon)
         msg.setWindowTitle(title)
@@ -1173,19 +1172,71 @@ class MainWindow(QWidget):
 
     def _deferred_init(self):
         self.conn = WPSConnector()
-        self.conn.connect()
+
         self.price_table = PriceTable()
         price_path = self.settings.value("price_file", "", type=str)
         if price_path:
             self.price_table.set_path(price_path)
             self.price_table.load()
         self.manager = EntryManager(self.conn, price_table=self.price_table)
+
         if self.price_table.loaded:
             self.log.setText(f"单价表已加载（{len(self.price_table.data)} 个型号）")
         else:
             self.log.setText("提示：点击'单价表'按钮选择单价表文件")
+
+        # 启动时只尝试连接一次，连不上就算了，不弹报错，依靠后台定时器去连
+        self.conn.connect()
         self.refresh_sheets()
         self.timer.start(1500)
+
+    def do_open_files(self):
+        base_dir = r"C:\Users\Administrator\Desktop\打磨抛光水磨产量表"
+        now = datetime.datetime.now()
+        year_str = str(now.year)
+        month_str = str(now.month)
+
+        year_dir = os.path.join(base_dir, year_str)
+        target_dir = os.path.join(year_dir, f"{month_str}月份")
+
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+            if not os.path.exists(year_dir):
+                os.makedirs(year_dir, exist_ok=True)
+                for m in range(1, 13):
+                    os.makedirs(os.path.join(year_dir, f"{m}月份"), exist_ok=True)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+        except Exception:
+            if os.path.exists(base_dir):
+                target_dir = base_dir
+            else:
+                target_dir = ""
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择要打开的表格（可多选）", target_dir, "Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)"
+        )
+        if not paths:
+            return
+
+        # 绝不用 COM 去干预 WPS 窗口，只用系统原生方式打开
+        for path in paths:
+            try:
+                os.startfile(path)
+            except Exception:
+                pass
+
+        self.log.setText("已通过系统打开所选文件，等待 WPS 加载...")
+        QApplication.processEvents()
+
+        # 给 WPS 留出加载时间，然后后台定时器会自动去连接并刷新界面
+        import time
+        time.sleep(2)
+
+        # 手动触发一次连接
+        if not self.conn.app:
+            self.conn.connect()
+            self.refresh_sheets()
 
     def build_ui(self):
         layout = QVBoxLayout(self)
@@ -1203,6 +1254,13 @@ class MainWindow(QWidget):
         btn_refresh = QPushButton("刷新")
         btn_refresh.clicked.connect(self.refresh_sheets)
         row1.addWidget(btn_refresh)
+
+        # 批量打开表格按钮
+        btn_open_files = QPushButton("📂 批量打开表格")
+        btn_open_files.clicked.connect(self.do_open_files)
+        btn_open_files.setStyleSheet("color: #0078D7; font-weight: bold;")
+        row1.addWidget(btn_open_files)
+
         layout.addLayout(row1)
 
         row2 = QHBoxLayout()
@@ -1443,6 +1501,13 @@ class MainWindow(QWidget):
             self.txt_model.setPlaceholderText("")
             self.txt_qty.setFocus()
             self.log.setText(f"批量录入完成：{done_model}，共 {done_count} 人")
+
+            try:
+                wb = self.conn.get_active_workbook()
+                if wb: wb.Save()
+            except Exception:
+                pass
+
             self._show_msg(QMessageBox.Information, "批量录入", f"全部完成！\n型号：{done_model}\n共 {done_count} 人")
         else:
             next_person = self.batch_persons[self.batch_index]
@@ -1758,18 +1823,28 @@ class MainWindow(QWidget):
 
     def monitor_wps(self):
         if self.conn is None or self._restoring or self.batch_mode: return
+
         if self.conn.app is None:
+            # 如果彻底断了，才去重连
             self.conn.connect()
             return
+
+        try:
+            # 如果当前没表格，静默等待，绝不切断连接，绝不重开进程！
+            if self.conn.app.Workbooks.Count == 0:
+                if self._last_workbook != "":
+                    self._last_workbook = ""
+                    self._last_sheet = ""
+                    self.lbl_status.setText("当前工作簿：-    当前人员：-")
+                return
+        except Exception:
+            return
+
         try:
             wb = self.conn.get_active_workbook()
         except Exception:
             return
         if wb is None:
-            if self._last_workbook != "":
-                self._last_workbook = ""
-                self._last_sheet = ""
-                self.lbl_status.setText("当前工作簿：-    当前人员：-")
             return
         try:
             wb_name = wb.Name
@@ -1830,14 +1905,14 @@ class MainWindow(QWidget):
         self.refresh_sheets()
 
     def refresh_sheets(self):
-        if self.conn.app is None: self.conn.connect()
+        if self.conn.app is None:
+            self.conn.connect()
+
         wb = self.conn.get_active_workbook()
         if wb is None:
-            self.conn.connect()
-            wb = self.conn.get_active_workbook()
-        if wb is None:
-            self.lbl_status.setText("当前工作簿：-    当前人员：-")
+            self.lbl_status.setText("当前工作簿：-（未打开表格，请点击【批量打开表格】）")
             return
+
         names = self.conn.get_sheet_names()
         current_items = [self.cbo_sheet.itemText(i) for i in range(self.cbo_sheet.count())]
         if current_items != names:
@@ -1918,7 +1993,6 @@ class MainWindow(QWidget):
 
         try:
             ok, msg = self.manager.entry(sheet, self.txt_day.text(), current_model, current_qty)
-            # 录入成功后，执行一次静默保存（确保数据不丢）
             if ok:
                 try:
                     wb = self.conn.get_active_workbook()
@@ -2271,20 +2345,15 @@ class MainWindow(QWidget):
             self.timer.stop()
         except Exception:
             pass
-
-        # 【新增】关闭软件前，强制保存当前工作簿，防止数据丢失
         try:
             wb = self.conn.get_active_workbook()
-            if wb is not None:
-                wb.Save()
+            if wb is not None: wb.Save()
         except Exception:
-            pass  # 如果用户提前关了 WPS，这里会报错，直接忽略即可
-
+            pass
         try:
             self.conn.wb = None
         except Exception:
             pass
-
         event.accept()
         try:
             QApplication.instance().quit()

@@ -33,24 +33,12 @@ class WPSConnector:
 
         pythoncom.CoInitialize()
 
-        # 核心改动 1：把 KWPS.Application 放在最前面，适配新版 WPS
-        for prog_id in ["KWPS.Application", "KET.Application", "ET.Application", "WPS.Application"]:
-            try:
-                # 核心改动 2：只使用 GetActiveObject，只连接你眼睛看得见的已打开的 WPS
-                self.app = win32com.client.GetActiveObject(prog_id)
-
-                # 核心改动 3：验证这个 WPS 进程里确实打开了表格，防止连到隐藏的空进程
-                if self.app.Workbooks.Count > 0:
-                    print("WPS 连接成功：", prog_id)
-                    return True
-                else:
-                    self.app = None  # 如果没有打开任何表格，就放弃这个进程
-            except Exception:
-                pass
-
-        # 核心改动 4：彻底删除了 Dispatch，绝对不让程序在后台偷偷启动隐藏的幽灵进程！
-        print("未找到已打开的 WPS 表格，请确保 WPS 已经打开了文件。")
-        return False
+        # 只负责连接当前活动的 WPS，如果找不到就返回 False
+        try:
+            self.app = win32com.client.GetActiveObject("KET.Application")
+            return True
+        except Exception:
+            return False
 
     def get_active_workbook(self):
         if self.app is None:
@@ -165,30 +153,7 @@ class WPSConnector:
         except Exception:
             return 1
 
-    def _clean_used_range(self, sh):
-        try:
-            ur = sh.UsedRange
-            ur_last_col = ur.Column + ur.Columns.Count - 1
-            ur_last_row = ur.Row + ur.Rows.Count - 1
-        except Exception:
-            return
-
-        if ur_last_col > 100:
-            try:
-                sh.Range(sh.Cells(1, 101), sh.Cells(1, ur_last_col)).EntireColumn.Delete()
-                print("已清理多余列 101 ~", ur_last_col)
-            except Exception as e:
-                print("清理多余列失败:", e)
-
-        if ur_last_row > 50:
-            try:
-                sh.Range(sh.Cells(51, 1), sh.Cells(ur_last_row, 1)).EntireRow.Delete()
-                print("已清理多余行 51 ~", ur_last_row)
-            except Exception as e:
-                print("清理多余行失败:", e)
-
     def insert_column(self, sh, col):
-        # 记录左列宽度
         left_width = None
         if col > 2:
             try:
@@ -196,14 +161,12 @@ class WPSConnector:
             except Exception:
                 pass
 
-        # 1. 执行插入
         try:
             sh.Columns(col).Insert(Shift=-4161)
         except Exception as e:
             print("插入列失败:", e)
             return False
 
-        # 2. 设置列宽和边框（放弃耗时的 Copy 复制格式，直接秒设）
         if left_width is not None:
             try:
                 sh.Columns(col).ColumnWidth = left_width
@@ -215,19 +178,15 @@ class WPSConnector:
         xlLineStyleNone = -4142
 
         try:
-            # 居中
             rng_center = sh.Range(sh.Cells(2, col), sh.Cells(37, col))
             rng_center.HorizontalAlignment = xlCenter
             rng_center.VerticalAlignment = xlCenter
-            # 边框（2-33行有线框）
             rng_border = sh.Range(sh.Cells(2, col), sh.Cells(33, col))
             for edge in [7, 8, 9, 10, 11, 12]:
                 rng_border.Borders(edge).LineStyle = xlContinuous
-            # 34-37行无线框
             rng_noborder = sh.Range(sh.Cells(34, col), sh.Cells(37, col))
             for edge in [7, 8, 9, 10, 11, 12]:
                 rng_noborder.Borders(edge).LineStyle = xlLineStyleNone
-            # 补回33行下边框
             sh.Cells(33, col).Borders(9).LineStyle = xlContinuous
         except Exception:
             pass
