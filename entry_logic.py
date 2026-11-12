@@ -9,6 +9,14 @@ from model_sort import (
     to_chinese_suffix
 )
 
+# 全局常量定义，防止硬编码引起的后续维护困难
+ROW_HEADER = 2
+ROW_START = 3
+ROW_END = 33
+ROW_SUM = 34
+ROW_PRICE = 35
+ROW_AMOUNT = 36
+ROW_TOTAL = 37
 
 class EntryManager:
     def __init__(self, connector, price_table=None):
@@ -16,7 +24,7 @@ class EntryManager:
         self.price_table = price_table
         self.undo_stack = []
         self.redo_stack = []
-        self._model_cache = {}  # <--- 新增：缓存 {sheet_name: {model: col_idx}}
+        self._model_cache = {}  # 缓存 {sheet_name: {model: col_idx}}
 
     def _is_ganmo(self, wb_name):
         return "干磨" in wb_name
@@ -82,7 +90,7 @@ class EntryManager:
             return False, f"{model_name} 未找到单价"
 
         try:
-            old = sh.Cells(35, col).Value
+            old = sh.Cells(ROW_PRICE, col).Value
         except Exception:
             old = None
 
@@ -94,7 +102,7 @@ class EntryManager:
                 pass
 
         try:
-            sh.Cells(35, col).Value = price
+            sh.Cells(ROW_PRICE, col).Value = price
             return True, ""
         except Exception as e:
             print("写单价失败:", e)
@@ -129,7 +137,7 @@ class EntryManager:
 
                 for c in range(2, last_col + 1):
                     try:
-                        header = sh.Cells(2, c).Value
+                        header = sh.Cells(ROW_HEADER, c).Value
                     except Exception:
                         continue
                     if header is None:
@@ -199,7 +207,7 @@ class EntryManager:
                     continue
 
                 try:
-                    rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+                    rng = sh.Range(sh.Cells(ROW_HEADER, 2), sh.Cells(ROW_HEADER, last_col))
                     headers = rng.Value
                     if not isinstance(headers, tuple):
                         headers = (headers,)
@@ -226,7 +234,7 @@ class EntryManager:
                         c = 2 + i
                         days_found = []
                         try:
-                            col_vals = sh.Range(sh.Cells(3, c), sh.Cells(33, c)).Value
+                            col_vals = sh.Range(sh.Cells(ROW_START, c), sh.Cells(ROW_END, c)).Value
                             if col_vals:
                                 if not isinstance(col_vals, tuple):
                                     col_vals = ((col_vals,),)
@@ -317,7 +325,7 @@ class EntryManager:
                 last_col = self.conn.scan_last_model_col(sh)
                 existing = []
                 try:
-                    rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+                    rng = sh.Range(sh.Cells(ROW_HEADER, 2), sh.Cells(ROW_HEADER, last_col))
                     vals = rng.Value
                     if isinstance(vals, tuple):
                         row_vals = vals[0]
@@ -339,13 +347,13 @@ class EntryManager:
                 if not ok: return False, "WPS 拒绝插入新列。"
 
                 self.conn.set_header_text_format(sh, insert_col)
-                sh.Cells(2, insert_col).Value = display_name
+                sh.Cells(ROW_HEADER, insert_col).Value = display_name
 
                 col_letter = self._col_letter(insert_col)
-                self.conn.write_formula(sh, 34, insert_col, f"=SUM({col_letter}3:{col_letter}33)")
+                self.conn.write_formula(sh, ROW_SUM, insert_col, f"=SUM({col_letter}{ROW_START}:{col_letter}{ROW_END})")
 
                 if self._is_ganmo(wb_name) and not is_time and not is_sample:
-                    self.conn.write_formula(sh, 36, insert_col, f"={col_letter}34*{col_letter}35")
+                    self.conn.write_formula(sh, ROW_AMOUNT, insert_col, f"={col_letter}{ROW_SUM}*{col_letter}{ROW_PRICE}")
 
                 col = insert_col
                 inserted = True
@@ -403,7 +411,7 @@ class EntryManager:
         # 简化的表头扫描
         headers = ()
         try:
-            rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+            rng = sh.Range(sh.Cells(ROW_HEADER, 2), sh.Cells(ROW_HEADER, last_col))
             hh = rng.Value
             if not isinstance(hh, tuple): hh = (hh,)
             if hh and isinstance(hh[0], tuple): hh = hh[0]
@@ -423,8 +431,8 @@ class EntryManager:
 
         if effective_last is None: return
 
-        total_row = 37 if self._is_ganmo(wb_name) else 35
-        sum_row = 36 if self._is_ganmo(wb_name) else 34
+        total_row = ROW_TOTAL if self._is_ganmo(wb_name) else ROW_PRICE
+        sum_row = ROW_AMOUNT if self._is_ganmo(wb_name) else ROW_SUM
 
         # 不再使用 ClearContents 清空整行，而是直接覆盖写入
         if effective_last == 2:
@@ -485,12 +493,12 @@ class EntryManager:
                 display_name = item.get("extra", {}).get("display_name", "")
                 if display_name:
                     self.conn.set_header_text_format(sh, item["col"])
-                    sh.Cells(2, item["col"]).Value = display_name
+                    sh.Cells(ROW_HEADER, item["col"]).Value = display_name
 
                     col_letter = self._col_letter(item["col"])
-                    self.conn.write_formula(sh, 34, item["col"], f"=SUM({col_letter}3:{col_letter}33)")
+                    self.conn.write_formula(sh, ROW_SUM, item["col"], f"=SUM({col_letter}{ROW_START}:{col_letter}{ROW_END})")
                     if self._is_ganmo(wb.Name) and display_name not in ("时间", "样品"):
-                        self.conn.write_formula(sh, 36, item["col"], f"={col_letter}34*{col_letter}35")
+                        self.conn.write_formula(sh, ROW_AMOUNT, item["col"], f"={col_letter}{ROW_SUM}*{col_letter}{ROW_PRICE}")
 
                 sh.Cells(item["row"], item["col"]).Value = item["new_value"]
             else:
@@ -585,7 +593,7 @@ class EntryManager:
 
         try:
             for sh in wb.Sheets:
-                sname = "未知表"  # ★ 修复：防止 sh.Name 报错导致下文崩溃
+                sname = "未知表"
                 try:
                     sname = sh.Name
                     if sname == "合计":
@@ -595,7 +603,7 @@ class EntryManager:
                     if last_col < 2:
                         continue
 
-                    rng = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+                    rng = sh.Range(sh.Cells(ROW_HEADER, 2), sh.Cells(ROW_HEADER, last_col))
                     headers = rng.Value
                     if not headers:
                         continue
@@ -612,7 +620,7 @@ class EntryManager:
                         if h_upper == old_model or (len(old_model) > 1 and old_model in h_upper):
                             col_idx = 2 + i
                             new_val = re.sub(re.escape(old_model), new_model, h_str, flags=re.IGNORECASE)
-                            sh.Cells(2, col_idx).Value = new_val
+                            sh.Cells(ROW_HEADER, col_idx).Value = new_val
                             replaced_count += 1
                 except Exception as e:
                     print(f"替换 {sname} 失败: {e}")
@@ -665,17 +673,17 @@ class EntryManager:
         except Exception:
             pass
 
-        a2 = new_sh.Cells(2, 1)
+        a2 = new_sh.Cells(ROW_HEADER, 1)
         a2.Value = "日期"
         a2.HorizontalAlignment = xlCenter
 
         for i in range(1, 32):
             new_sh.Cells(i + 2, 1).Value = i
 
-        rng_days = new_sh.Range(new_sh.Cells(3, 1), new_sh.Cells(33, 1))
+        rng_days = new_sh.Range(new_sh.Cells(ROW_START, 1), new_sh.Cells(ROW_END, 1))
         rng_days.HorizontalAlignment = xlCenter
 
-        rng_border = new_sh.Range(new_sh.Cells(2, 1), new_sh.Cells(33, 1))
+        rng_border = new_sh.Range(new_sh.Cells(ROW_HEADER, 1), new_sh.Cells(ROW_END, 1))
         try:
             for edge in [xlEdgeLeft, xlEdgeTop, xlEdgeBottom, xlEdgeRight,
                          xlInsideHorizontal, xlInsideVertical]:
@@ -734,12 +742,11 @@ class EntryManager:
                 if last_col < 2:
                     continue
 
-                # ★ 修复：干磨表的日合计在第 36 行，普通表在第 34 行
                 is_ganmo = self._is_ganmo(wb.Name)
-                check_row = 36 if is_ganmo else 34
+                check_row = ROW_AMOUNT if is_ganmo else ROW_SUM
 
                 try:
-                    rng_h = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+                    rng_h = sh.Range(sh.Cells(ROW_HEADER, 2), sh.Cells(ROW_HEADER, last_col))
                     rng_v = sh.Range(sh.Cells(check_row, 2), sh.Cells(check_row, last_col))
                     headers = rng_h.Value
                     values = rng_v.Value
@@ -855,7 +862,7 @@ class EntryManager:
         to_delete = []
         for c in range(2, last_col + 1):
             try:
-                header = sh.Cells(2, c).Value
+                header = sh.Cells(ROW_HEADER, c).Value
             except Exception:
                 continue
             if header is None:
@@ -865,7 +872,7 @@ class EntryManager:
                 continue
 
             try:
-                val = sh.Cells(34, c).Value
+                val = sh.Cells(ROW_SUM, c).Value
             except Exception:
                 continue
 
@@ -909,9 +916,9 @@ class EntryManager:
     # ---------- 修帽子合计统计 ----------
     def _read_total_value(self, sh, wb_name):
         if "干磨" in wb_name:
-            total_row = 37
+            total_row = ROW_TOTAL
         else:
-            total_row = 35
+            total_row = ROW_PRICE
         try:
             last_col = self.conn.scan_last_model_col(sh)
         except Exception:
@@ -1044,10 +1051,10 @@ class EntryManager:
 
                 if last_col >= 2:
                     try:
-                        rng_h = src_sh.Range(src_sh.Cells(2, 2),
-                                             src_sh.Cells(2, last_col))
-                        rng_v = src_sh.Range(src_sh.Cells(34, 2),
-                                             src_sh.Cells(34, last_col))
+                        rng_h = src_sh.Range(src_sh.Cells(ROW_HEADER, 2),
+                                             src_sh.Cells(ROW_HEADER, last_col))
+                        rng_v = src_sh.Range(src_sh.Cells(ROW_SUM, 2),
+                                             src_sh.Cells(ROW_SUM, last_col))
                         headers = rng_h.Value
                         values = rng_v.Value
                         if not isinstance(headers, tuple):
@@ -1190,7 +1197,7 @@ class EntryManager:
         is_ganmo = self._is_ganmo(wb_name)
 
         try:
-            rng_h = sh.Range(sh.Cells(2, 2), sh.Cells(2, last_col))
+            rng_h = sh.Range(sh.Cells(ROW_HEADER, 2), sh.Cells(ROW_HEADER, last_col))
             headers = rng_h.Value
             if not isinstance(headers, tuple):
                 headers = (headers,)
@@ -1200,7 +1207,7 @@ class EntryManager:
             return fixes
 
         try:
-            rng_34 = sh.Range(sh.Cells(34, 2), sh.Cells(34, last_col))
+            rng_34 = sh.Range(sh.Cells(ROW_SUM, 2), sh.Cells(ROW_SUM, last_col))
             f34 = rng_34.Formula
             if not isinstance(f34, tuple):
                 f34 = (f34,)
@@ -1211,7 +1218,7 @@ class EntryManager:
 
         if is_ganmo:
             try:
-                rng_36 = sh.Range(sh.Cells(36, 2), sh.Cells(36, last_col))
+                rng_36 = sh.Range(sh.Cells(ROW_AMOUNT, 2), sh.Cells(ROW_AMOUNT, last_col))
                 f36 = rng_36.Formula
                 if not isinstance(f36, tuple):
                     f36 = (f36,)
@@ -1233,7 +1240,7 @@ class EntryManager:
             if hs == "":
                 continue
 
-            exp34 = f"=SUM({col_letter}3:{col_letter}33)"
+            exp34 = f"=SUM({col_letter}{ROW_START}:{col_letter}{ROW_END})"
             got34 = f34[i] if i < len(f34) else None
             got34_s = str(got34).strip() if got34 is not None else ""
             if got34_s.upper() != exp34.upper():
@@ -1246,7 +1253,7 @@ class EntryManager:
                     if got36_s != "":
                         fix_36[col] = ""
                 else:
-                    exp36 = f"={col_letter}34*{col_letter}35"
+                    exp36 = f"={col_letter}{ROW_SUM}*{col_letter}{ROW_PRICE}"
                     got36 = f36[i] if i < len(f36) else None
                     got36_s = str(got36).strip() if got36 is not None else ""
                     if got36_s.upper() != exp36.upper():
@@ -1254,19 +1261,19 @@ class EntryManager:
 
         for col, formula in fix_34.items():
             try:
-                self.conn.write_formula(sh, 34, col, formula)
-                fixes.append(f"{sh.Name}!{self._col_letter(col)}34")
+                self.conn.write_formula(sh, ROW_SUM, col, formula)
+                fixes.append(f"{sh.Name}!{self._col_letter(col)}{ROW_SUM}")
             except Exception:
                 pass
 
         for col, formula in fix_36.items():
             try:
                 if formula == "":
-                    sh.Cells(36, col).ClearContents()
-                    fixes.append(f"{sh.Name}!{self._col_letter(col)}36清空")
+                    sh.Cells(ROW_AMOUNT, col).ClearContents()
+                    fixes.append(f"{sh.Name}!{self._col_letter(col)}{ROW_AMOUNT}清空")
                 else:
-                    self.conn.write_formula(sh, 36, col, formula)
-                    fixes.append(f"{sh.Name}!{self._col_letter(col)}36")
+                    self.conn.write_formula(sh, ROW_AMOUNT, col, formula)
+                    fixes.append(f"{sh.Name}!{self._col_letter(col)}{ROW_AMOUNT}")
             except Exception:
                 pass
 
@@ -1290,11 +1297,11 @@ class EntryManager:
             return fixes
 
         if is_ganmo:
-            total_row = 37
-            sum_row = 36
+            total_row = ROW_TOTAL
+            sum_row = ROW_AMOUNT
         else:
-            total_row = 35
-            sum_row = 34
+            total_row = ROW_PRICE
+            sum_row = ROW_SUM
 
         if effective_last == 2:
             label_col = effective_last
@@ -1421,7 +1428,7 @@ class EntryManager:
 
         try:
             for sh in wb.Sheets:
-                name = "未知表"  # ★ 修复：确保 name 有定义
+                name = "未知表"
                 try:
                     name = sh.Name
                 except Exception:
@@ -1440,7 +1447,7 @@ class EntryManager:
                     continue
 
                 try:
-                    rng = sh.Range(sh.Cells(3, 2), sh.Cells(33, last_col))
+                    rng = sh.Range(sh.Cells(ROW_START, 2), sh.Cells(ROW_END, last_col))
                     vals = rng.Value
                 except Exception as e:
                     print(f"读 {name} 失败: {e}")
@@ -1541,7 +1548,7 @@ class EntryManager:
 
         try:
             for sh in wb.Sheets:
-                sname = "未知表"  # ★ 修复：确保 sname 有定义
+                sname = "未知表"
                 try:
                     sname = sh.Name
                     ps = sh.PageSetup

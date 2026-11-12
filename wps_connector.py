@@ -33,12 +33,14 @@ class WPSConnector:
 
         pythoncom.CoInitialize()
 
-        # 只负责连接当前活动的 WPS，如果找不到就返回 False
-        try:
-            self.app = win32com.client.GetActiveObject("KET.Application")
-            return True
-        except Exception:
-            return False
+        # 同时尝试连接 WPS 和 Excel
+        for prog_id in ["KET.Application", "Excel.Application"]:
+            try:
+                self.app = win32com.client.GetActiveObject(prog_id)
+                return True
+            except Exception:
+                continue
+        return False
 
     def get_active_workbook(self):
         if self.app is None:
@@ -118,6 +120,17 @@ class WPSConnector:
             return sh.Name
         except Exception:
             return ""
+
+    def save_active(self):
+        """封装保存当前工作簿的方法，带异常输出"""
+        try:
+            wb = self.get_active_workbook()
+            if wb:
+                wb.Save()
+                return True
+        except Exception as e:
+            print(f"保存工作簿失败: {e}")
+        return False
 
     def _col_letter(self, col):
         result = ""

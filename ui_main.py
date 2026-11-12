@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QLayout, QPlainTextEdit, QCompleter, QFormLayout, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, QSettings, QTimer, QEvent, Signal, QElapsedTimer, QRect, QSize, QPoint
+from PySide6.QtGui import QIntValidator  # 用于限制输入框只能输数字
 
 from wps_connector import WPSConnector
 from entry_logic import EntryManager
@@ -141,6 +142,7 @@ class MultiDialog(QDialog):
 
         layout.addWidget(QLabel("日期（几号）："))
         self.txt_day = QLineEdit()
+        self.txt_day.setValidator(QIntValidator(1, 31, self))  # 限制只能输入 1-31
         if default_day:
             self.txt_day.setText(default_day)
         else:
@@ -329,10 +331,31 @@ class MultiDialog(QDialog):
             for i, name in enumerate(selected):
                 self.lbl_status.setText(f"正在录入 {name} ({i + 1}/{n})...")
                 QApplication.processEvents()
+
+                # 录入前，先让 WPS/Excel 跳转到当前录入人员的 sheet，方便直观看到录入过程
+                try:
+                    self.manager.conn.activate_sheet(name)
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+
                 ok, msg = self.manager.entry(name, day, model, str(total_num / n))
                 if ok:
                     actual_success_count += 1
                 results.append(f"{name}: {'成功' if ok else '失败：' + msg}")
+
+            # 多人合作录入完毕后，统一保存一次工作簿
+            if actual_success_count > 0:
+                self.manager.conn.save_active()
+
+                # 所有人员录入完毕后，统一刷新一次主界面
+                if self.parent_window:
+                    try:
+                        self.parent_window._last_sheet = selected[-1] if selected else ""
+                        self.parent_window.refresh_sheets()
+                    except Exception:
+                        pass
+
             msg_all = "\n".join(results)
         except Exception as e:
             msg_all = str(e)
@@ -525,6 +548,7 @@ class QueryDateDialog(QDialog):
         row.addWidget(QLabel("日期（几号）："))
         self.txt_day = QLineEdit()
         self.txt_day.setFixedWidth(80)
+        self.txt_day.setValidator(QIntValidator(1, 31, self))  # 限制只能输入 1-31
         self.txt_day.returnPressed.connect(self.do_query)
         row.addWidget(self.txt_day)
         btn_query = QPushButton("查询")
@@ -714,6 +738,7 @@ class QueryDateDialog(QDialog):
                 pass
 
             for sheet_name in selected:
+                QApplication.processEvents()  # 防止卡死
                 try:
                     sh = wb.Sheets(sheet_name)
                 except Exception:
@@ -817,6 +842,7 @@ class GlobalQueryDialog(QDialog):
         row1.addWidget(QLabel("日期："))
         self.txt_day = QLineEdit()
         self.txt_day.setPlaceholderText("留空=查所有日期")
+        self.txt_day.setValidator(QIntValidator(1, 31, self))  # 限制只能输入 1-31
         row1.addWidget(self.txt_day)
         layout.addLayout(row1)
 
@@ -882,6 +908,7 @@ class GlobalQueryDialog(QDialog):
 
         try:
             for wb in self.conn.app.Workbooks:
+                QApplication.processEvents()  # 防卡顿
                 wb_name = wb.Name
                 for sh in wb.Sheets:
                     sh_name = sh.Name
@@ -951,6 +978,7 @@ class GlobalQueryDialog(QDialog):
         model_grand = defaultdict(float)
 
         for wb_name in selected_wbs:
+            QApplication.processEvents()  # 防卡顿
             try:
                 wb = self.conn.app.Workbooks(wb_name)
             except Exception:
@@ -1226,17 +1254,19 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
-        self.log.setText("已通过系统打开所选文件，等待 WPS 加载...")
+        self.log.setText("已通过系统打开所选文件，等待办公软件加载...")
         QApplication.processEvents()
 
-        # 给 WPS 留出加载时间，然后后台定时器会自动去连接并刷新界面
         import time
-        time.sleep(2)
-
-        # 手动触发一次连接
-        if not self.conn.app:
-            self.conn.connect()
-            self.refresh_sheets()
+        # 循环等待最多 10 秒，直到成功抓取到活动工作簿
+        for _ in range(20):
+            time.sleep(0.5)
+            QApplication.processEvents()
+            if self.conn.connect():
+                wb = self.conn.get_active_workbook()
+                if wb is not None:
+                    break
+        self.refresh_sheets()
 
     def build_ui(self):
         layout = QVBoxLayout(self)
@@ -1266,6 +1296,7 @@ class MainWindow(QWidget):
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("日期（几号）："))
         self.txt_day = QLineEdit()
+        self.txt_day.setValidator(QIntValidator(1, 31, self))  # 限制只能输入 1-31
         self.txt_day.setText(self.settings.value("last_day", "", type=str))
         self.txt_day.returnPressed.connect(lambda: self.txt_model.setFocus())
         self.txt_day.installEventFilter(self)
@@ -1480,6 +1511,9 @@ class MainWindow(QWidget):
             rec = self.manager.undo_stack[-1]
             self.batch_history.append({"person": person, "model": self.batch_model, "qty": qty, "record": rec})
 
+        # 每次录完当前人员，立刻保存工作簿
+        self.conn.save_active()
+
         try:
             self.settings.setValue("last_day", day)
             self.settings.setValue("last_model", self.batch_model)
@@ -1501,22 +1535,25 @@ class MainWindow(QWidget):
             self.txt_model.setPlaceholderText("")
             self.txt_qty.setFocus()
             self.log.setText(f"批量录入完成：{done_model}，共 {done_count} 人")
-
-            try:
-                wb = self.conn.get_active_workbook()
-                if wb: wb.Save()
-            except Exception:
-                pass
-
             self._show_msg(QMessageBox.Information, "批量录入", f"全部完成！\n型号：{done_model}\n共 {done_count} 人")
         else:
             next_person = self.batch_persons[self.batch_index]
             try:
+                # 强制恢复 WPS 屏幕刷新，并激活下一个人名的 Sheet
+                if self.conn.app:
+                    self.conn.app.ScreenUpdating = True
+
                 self.conn.activate_sheet(next_person)
+
+                # 确保 WPS 界面跟着切换过去
+                if self.conn.app:
+                    self.conn.app.ActiveWindow.ScrollRow = 1  # 让页面滚回顶部，方便核对
+
                 self._last_sheet = next_person
                 self.refresh_sheets()
             except Exception as e:
                 print("切换 sheet 失败:", e)
+
             self.txt_qty.setFocus()
             idx = self.batch_index + 1
             self.log.setText(
@@ -1556,10 +1593,7 @@ class MainWindow(QWidget):
                 self.manager._update_total(sh, wb.Name)
             except Exception:
                 pass
-            try:
-                wb.Save()
-            except Exception:
-                pass
+            self.conn.save_active()
             if self.manager.undo_stack and self.manager.undo_stack[-1] is rec:
                 self.manager.undo_stack.pop()
         except Exception as e:
@@ -1763,11 +1797,7 @@ class MainWindow(QWidget):
             QApplication.processEvents()
 
         if ok:
-            try:
-                wb = self.conn.get_active_workbook()
-                if wb: wb.Save()
-            except Exception:
-                pass
+            self.conn.save_active()
             self._show_msg(QMessageBox.Information, "检查排版", err2)
             self.log.setText(err2)
         else:
@@ -1994,11 +2024,7 @@ class MainWindow(QWidget):
         try:
             ok, msg = self.manager.entry(sheet, self.txt_day.text(), current_model, current_qty)
             if ok:
-                try:
-                    wb = self.conn.get_active_workbook()
-                    if wb: wb.Save()
-                except Exception:
-                    pass
+                self.conn.save_active()
         finally:
             self.setEnabled(True)
             self.activateWindow()
@@ -2039,14 +2065,7 @@ class MainWindow(QWidget):
         row = item["row"]
         col = item["col"]
 
-        def _col_letter(c):
-            res = ""
-            while c > 0:
-                c, rem = divmod(c - 1, 26)
-                res = chr(65 + rem) + res
-            return res
-
-        col_letter = _col_letter(col)
+        col_letter = self.conn._col_letter(col)
         if item["inserted"]:
             action_desc = f"【新插入列】：{sheet_name} 表的 {col_letter} 列"
         else:
@@ -2086,14 +2105,7 @@ class MainWindow(QWidget):
         row = item["row"]
         col = item["col"]
 
-        def _col_letter(c):
-            res = ""
-            while c > 0:
-                c, rem = divmod(c - 1, 26)
-                res = chr(65 + rem) + res
-            return res
-
-        col_letter = _col_letter(col)
+        col_letter = self.conn._col_letter(col)
         if item["inserted"]:
             action_desc = f"【重新插入列】：{sheet_name} 表的 {col_letter} 列"
         else:
@@ -2159,12 +2171,7 @@ class MainWindow(QWidget):
         try:
             ok, msg2 = self.manager.delete_sheets(empty)
             if ok:
-                try:
-                    wb = self.conn.get_active_workbook()
-                    if wb: wb.Save()
-                except Exception as e:
-                    self._show_msg(QMessageBox.Warning, "保存失败",
-                                   f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+                self.conn.save_active()
         finally:
             self.setEnabled(True)
             self.activateWindow()
@@ -2203,12 +2210,7 @@ class MainWindow(QWidget):
         try:
             ok, msg2 = self.manager.do_delete_columns_batch(items)
             if ok:
-                try:
-                    wb = self.conn.get_active_workbook()
-                    if wb: wb.Save()
-                except Exception as e:
-                    self._show_msg(QMessageBox.Warning, "保存失败",
-                                   f"清理成功，但保存文件时出错：{e}\n请手动按 Ctrl+S 保存。")
+                self.conn.save_active()
         finally:
             self.setEnabled(True)
             self.activateWindow()
@@ -2270,6 +2272,7 @@ class MainWindow(QWidget):
         layout.addWidget(QLabel("请输入要清空的日期（几号）："))
         txt_day = QLineEdit()
         txt_day.setPlaceholderText("如 27")
+        txt_day.setValidator(QIntValidator(1, 31, self))  # 限制只能输入 1-31
         layout.addWidget(txt_day)
         layout.addWidget(QLabel("勾选要清空的人员（可多选）："))
         lst = QListWidget()
@@ -2336,18 +2339,24 @@ class MainWindow(QWidget):
             if ok:
                 self._show_msg(QMessageBox.Information, "完成", msg)
                 self.refresh_sheets()
-                self._scan_files()
             else:
                 self._show_msg(QMessageBox.Warning, "失败", msg)
 
     def closeEvent(self, event):
+        if self.batch_mode:
+            reply = self._show_msg(QMessageBox.Question, "退出程序",
+                                   "当前处于批量录入模式，你确定要退出吗？\n已录入的数据会自动保存。",
+                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+
         try:
             self.timer.stop()
         except Exception:
             pass
         try:
-            wb = self.conn.get_active_workbook()
-            if wb is not None: wb.Save()
+            self.conn.save_active()
         except Exception:
             pass
         try:
