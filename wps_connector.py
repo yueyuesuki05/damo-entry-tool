@@ -207,8 +207,10 @@ class WPSConnector:
         return True
 
     def find_model_column(self, sh, model, normalizer=None):
-        from model_sort import to_abbr, to_abbr_loose
+        from model_sort import to_abbr, to_abbr_loose, to_chinese_suffix
 
+        target_cn = to_chinese_suffix(model)  # 输入 SJ，这里会变成 "时间"
+        target_cn_key = _model_key(target_cn)
         target_key = _model_key(model)
         target_abbr = to_abbr(model)
         target_abbr_loose = to_abbr_loose(model)
@@ -229,21 +231,26 @@ class WPSConnector:
         else:
             row_vals = (values,)
 
+        # ★ 核心修复：优先匹配中文全称（比如输入 SJ，去找表头的“时间”）
         for i, v in enumerate(row_vals):
-            if v is None:
-                continue
+            if v is None: continue
+            if _model_key(str(v)) == target_cn_key:
+                return i + 2
+
+        # 然后匹配原输入
+        for i, v in enumerate(row_vals):
+            if v is None: continue
             if _model_key(str(v)) == target_key:
                 return i + 2
 
+        # 最后匹配缩写
         for i, v in enumerate(row_vals):
-            if v is None:
-                continue
+            if v is None: continue
             if to_abbr(str(v)) == target_abbr:
                 return i + 2
 
         for i, v in enumerate(row_vals):
-            if v is None:
-                continue
+            if v is None: continue
             if to_abbr_loose(str(v)) == target_abbr_loose:
                 return i + 2
 

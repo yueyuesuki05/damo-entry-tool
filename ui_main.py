@@ -21,6 +21,36 @@ from entry_logic import EntryManager
 from price_loader import PriceTable
 
 
+class ShiftSelectListWidget(QListWidget):
+    """自定义列表控件：支持 Shift 键连选，且保留直接点击多选的功能"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._last_clicked_row = -1
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            index = self.indexAt(event.pos())
+            if index.isValid():
+                current_row = index.row()
+                # ★ 核心：如果按下了 Shift 键，并且之前点击过某一行
+                if (event.modifiers() & Qt.ShiftModifier) and self._last_clicked_row != -1:
+                    min_row = min(self._last_clicked_row, current_row)
+                    max_row = max(self._last_clicked_row, current_row)
+
+                    # 将范围内的全部设为选中
+                    for i in range(min_row, max_row + 1):
+                        item = self.item(i)
+                        if item:
+                            item.setSelected(True)
+                    return  # 拦截事件，防止默认事件把选中状态弄乱
+
+                # 更新上一次点击的基准行
+                self._last_clicked_row = current_row
+
+        super().mousePressEvent(event)
+
+
 class FlowLayout(QLayout):
     def __init__(self, parent=None, margin=0, h_spacing=6, v_spacing=6):
         super().__init__(parent)
@@ -132,7 +162,7 @@ class MultiDialog(QDialog):
         layout = QVBoxLayout(self)
 
         layout.addWidget(QLabel("选择合作人员（可多选）："))
-        self.list_widget = QListWidget()
+        self.list_widget = ShiftSelectListWidget()
         self.list_widget.setSelectionMode(QListWidget.MultiSelection)
         for name in sheet_names:
             self.list_widget.addItem(QListWidgetItem(name))
@@ -379,26 +409,85 @@ class MultiDialog(QDialog):
             QTimer.singleShot(50, self._refocus)
 
     def do_multi_undo(self):
-        if self.batch_count <= 0: return
-        reply = self._show_msg(QMessageBox.Question, "批量撤回",
-                               f"确定要撤回刚刚录入的这 {self.batch_count} 人的数据吗？\n（连续执行 {self.batch_count} 次撤回）",
-                               QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if not self.manager.undo_stack:
+            self.lbl_status.setText("没有可撤回的数据了。")
+            self.btn_undo.setEnabled(False)
+            return
+
+        # ★ 核心修复：从 undo_stack 中提取最近 batch_count 条记录，生成撤回明细
+        records = self.manager.undo_stack[-self.batch_count:]
+        info_lines = []
+        for rec in reversed(records):  # 倒序，显示最后录的在最上面
+            sheet = rec.get("sheet_name", "未知人员")
+            row = rec.get("row", "?")
+            col = rec.get("col", 0)
+            model_name = "未知型号"
+
+            # 尝试反查型号列名
+            if not rec.get("inserted"):
+                try:
+                    wb = self.manager.conn.get_active_workbook()
+                    if wb:
+                        sh = wb.Sheets(sheet)
+                        val = sh.Cells(2, col).Value
+                        if val: model_name = str(val).strip()
+                except:
+                    pass
+            else:
+                model_name = rec.get("extra", {}).get("display_name", "未知型号")
+                model_name = f"{model_name} (新插入列)"
+
+            info_lines.append(f"· 人员 [{sheet}] 型号 {model_name} 第 {row} 行")
+
+        msg_detail = "\n".join(info_lines)
+
+        reply = self._show_msg(
+            QMessageBox.Question,
+            "批量撤回",
+            f"确定要撤回刚刚录入的这 {self.batch_count} 人的数据吗？\n\n【撤回明细】\n{msg_detail}\n\n（连续执行 {self.batch_count} 次撤回）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
         if reply != QMessageBox.Yes: return
 
         success = 0
+        results = []
         for _ in range(self.batch_count):
+            if not self.manager.undo_stack:
+                break
+
+            # 提取当次撤回的信息用于底部状态提示
+            item = self.manager.undo_stack[-1]
+            sheet_name = item["sheet_name"]
+            row = item["row"]
+            col = item["col"]
+            model_name = "未知型号"
+            if not item["inserted"]:
+                try:
+                    wb = self.manager.conn.get_active_workbook()
+                    if wb:
+                        sh = wb.Sheets(sheet_name)
+                        val = sh.Cells(2, col).Value
+                        if val: model_name = str(val).strip()
+                except:
+                    pass
+
             ok, _ = self.manager.undo()
             if ok:
                 success += 1
+                results.append(f"[{sheet_name}] {model_name} 第{row}行")
             else:
                 break
 
         if success > 0:
-            self.lbl_status.setText(f"已成功撤回 {success} 人的数据。")
-            self.btn_undo.setEnabled(False)
+            msg = f"已成功撤回 {success} 人的数据：\n" + "\n".join(results)
+            self.lbl_status.setText(msg)
             self.btn_redo.setEnabled(True)
         else:
             self.lbl_status.setText("撤回失败。")
+
+        # ★ 核心修复：只要栈里还有数据，就允许继续点撤回
+        self.btn_undo.setEnabled(len(self.manager.undo_stack) > 0)
 
     def do_multi_redo(self):
         if self.batch_count <= 0: return
@@ -440,7 +529,7 @@ class MultiBatchDialog(QDialog):
         layout = QVBoxLayout(self)
 
         layout.addWidget(QLabel("选择人员（按 sheet 顺序，可多选）："))
-        self.list_widget = QListWidget()
+        self.list_widget = ShiftSelectListWidget()
         self.list_widget.setSelectionMode(QListWidget.MultiSelection)
         for name in sheet_names:
             self.list_widget.addItem(QListWidgetItem(name))
@@ -1619,6 +1708,9 @@ class MainWindow(QWidget):
         self.txt_qty.setFocus()
         total = len(self.batch_persons)
         idx = self.batch_index + 1
+        #★ 提取具体型号和行号
+        model_name = item.get("model", "未知型号")
+        row_num = rec.get("row", "?")
         self.log.setText(f"已回退到：{person}（{idx}/{total}）\n型号：{self.batch_model}，请重新输入数量")
 
     def _cancel_batch(self):
@@ -2061,17 +2153,32 @@ class MainWindow(QWidget):
             return
 
         item = self.manager.undo_stack[-1]
+        wb_name = item.get("wb_name", "未知工作簿")
         sheet_name = item["sheet_name"]
         row = item["row"]
         col = item["col"]
 
-        col_letter = self.conn._col_letter(col)
+        # ★ 核心修复：动态反查型号名
+        model_name = "未知型号"
+        if not item["inserted"]:
+            try:
+                wb = self.conn.get_active_workbook()
+                if wb:
+                    sh = wb.Sheets(sheet_name)
+                    val = sh.Cells(2, col).Value
+                    if val: model_name = str(val).strip()
+            except:
+                pass
+        else:
+            model_name = item.get("extra", {}).get("display_name", "未知型号")
+            model_name = f"{model_name} (新插入列)"
+
         if item["inserted"]:
-            action_desc = f"【新插入列】：{sheet_name} 表的 {col_letter} 列"
+            action_desc = f"【删除新插入的列】：\n工作簿《{wb_name}》 -> 人员 [{sheet_name}] -> 型号 {model_name}"
         else:
             old_val = item["old_value"] if item["old_value"] is not None else "空"
             new_val = item.get("new_value") if item.get("new_value") is not None else "空"
-            action_desc = f"【数据修改】：{sheet_name} 表的 {col_letter}{row} 单元格，将“{new_val}”恢复为“{old_val}”"
+            action_desc = f"【数据修改】：\n工作簿《{wb_name}》 -> 人员 [{sheet_name}] -> 型号 {model_name} 的第 {row} 行\n将“{new_val}”恢复为“{old_val}”"
 
         reply = self._show_msg(QMessageBox.Question, "撤回确认", f"即将撤回以下操作，是否继续？\n\n{action_desc}",
                                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
@@ -2101,16 +2208,30 @@ class MainWindow(QWidget):
             return
 
         item = self.manager.redo_stack[-1]
+        wb_name = item.get("wb_name", "未知工作簿")
         sheet_name = item["sheet_name"]
         row = item["row"]
         col = item["col"]
 
-        col_letter = self.conn._col_letter(col)
+        model_name = "未知型号"
+        if not item["inserted"]:
+            try:
+                wb = self.conn.get_active_workbook()
+                if wb:
+                    sh = wb.Sheets(sheet_name)
+                    val = sh.Cells(2, col).Value
+                    if val: model_name = str(val).strip()
+            except:
+                pass
+        else:
+            model_name = item.get("extra", {}).get("display_name", "未知型号")
+            model_name = f"{model_name} (新插入列)"
+
         if item["inserted"]:
-            action_desc = f"【重新插入列】：{sheet_name} 表的 {col_letter} 列"
+            action_desc = f"【重新插入列】：\n工作簿《{wb_name}》 -> 人员 [{sheet_name}] -> 型号 {model_name}"
         else:
             new_val = item.get("new_value") if item.get("new_value") is not None else "空"
-            action_desc = f"【重新写入】：{sheet_name} 表的 {col_letter}{row} 单元格，将改回“{new_val}”"
+            action_desc = f"【重新写入】：\n工作簿《{wb_name}》 -> 人员 [{sheet_name}] -> 型号 {model_name} 的第 {row} 行\n将改回“{new_val}”"
 
         reply = self._show_msg(QMessageBox.Question, "回退确认", f"即将回退以下操作，是否继续？\n\n{action_desc}",
                                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
