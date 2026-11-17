@@ -1357,6 +1357,52 @@ class MainWindow(QWidget):
                     break
         self.refresh_sheets()
 
+    def _day_minus(self):
+        """日期减1天"""
+        self._adjust_day(-1)
+
+    def _day_plus(self):
+        """日期加1天"""
+        self._adjust_day(1)
+
+    def _adjust_day(self, delta):
+        """处理纯数字日期的加减边界逻辑（1-31）"""
+        import datetime
+        import calendar
+
+        day_str = self.txt_day.text().strip()
+
+        # 如果为空，默认使用系统当前的日期
+        if not day_str:
+            now = datetime.datetime.now()
+            month = now.month
+            day = now.day
+        else:
+            try:
+                day = int(day_str)
+                month = datetime.datetime.now().month
+            except ValueError:
+                return
+
+        # 获取该月的最大天数（自动处理 30天/31天/2月）
+        year = datetime.datetime.now().year
+        try:
+            max_days = calendar.monthrange(year, month)[1]
+        except Exception:
+            max_days = 31
+
+        new_day = day + delta
+        # 限制上下边界，不跨月
+        if new_day < 1:
+            new_day = 1
+        elif new_day > max_days:
+            new_day = max_days
+
+        if new_day != day:
+            self.txt_day.setText(str(new_day))
+            self.txt_day.setFocus()
+            self.txt_day.selectAll()
+
     def build_ui(self):
         layout = QVBoxLayout(self)
         self.lbl_status = QLabel("当前工作簿：-    当前人员：-")
@@ -1382,6 +1428,26 @@ class MainWindow(QWidget):
 
         layout.addLayout(row1)
 
+        # ★ 新增：将昨天、明天按钮放在日期行的上一行
+        date_btn_layout = QHBoxLayout()
+        date_btn_layout.addWidget(QLabel("日期快调："))
+
+        self.btn_yesterday = QPushButton("昨天")
+        self.btn_yesterday.setFixedWidth(60)
+        self.btn_yesterday.setFocusPolicy(Qt.NoFocus)
+        self.btn_yesterday.clicked.connect(self._day_minus)
+        date_btn_layout.addWidget(self.btn_yesterday)
+
+        self.btn_tomorrow = QPushButton("明天")
+        self.btn_tomorrow.setFixedWidth(60)
+        self.btn_tomorrow.setFocusPolicy(Qt.NoFocus)
+        self.btn_tomorrow.clicked.connect(self._day_plus)
+        date_btn_layout.addWidget(self.btn_tomorrow)
+
+        date_btn_layout.addStretch()
+        layout.addLayout(date_btn_layout)
+
+        # 原有的日期输入行
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("日期（几号）："))
         self.txt_day = QLineEdit()

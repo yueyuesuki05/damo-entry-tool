@@ -4,7 +4,7 @@
 # @Time     : 2026/9/30 13:17
 import re
 
-
+# ★ 在这里添加你需要的自定义中文字母映射（前缀加后缀组合的缩写）
 _PINYIN_MAP = {
     "帽檐": "MY",
     "下巴": "XB",
@@ -12,7 +12,14 @@ _PINYIN_MAP = {
     "顶盖": "DG",
     "时间": "SJ",
     "样品": "YP",
+    # 自定义中文+后缀组合的缩写（不区分大小写，输入WNWY会自动转为万能尾翼）
+    "万能尾翼": "WNWY",
+    "万能帽檐": "WNMY",
+    "万能下巴": "WNXB",
+    "万能顶盖": "WNDG",
 }
+
+# 生成反向映射表
 _ABBR_TO_CN = {v: k for k, v in _PINYIN_MAP.items()}
 
 
@@ -35,7 +42,8 @@ def normalize_model(m: str) -> str:
 
 def to_abbr(m: str) -> str:
     s = normalize_model(m)
-    for cn, abbr in _PINYIN_MAP.items():
+    # 按长度倒序替换，防止短词替换导致长词被破坏（比如先替换了尾翼，万能尾翼就无法被替换了）
+    for cn, abbr in sorted(_PINYIN_MAP.items(), key=lambda x: len(x[0]), reverse=True):
         s = s.replace(cn, abbr)
     return s
 
@@ -55,15 +63,17 @@ def to_abbr_loose(m: str) -> str:
 def to_chinese_suffix(m: str) -> str:
     s = normalize_model(m)
 
-    if s == "SJ":
-        return "时间"
-    if s == "YP":
-        return "样品"
+    # 1. 优先处理完全匹配的缩写（比如用户输入了 SJ, YP, WNWY 等纯字母）
+    if s in _ABBR_TO_CN:
+        return _ABBR_TO_CN[s]
 
-    for abbr, cn in _ABBR_TO_CN.items():
+    # 2. 处理带前缀的后缀缩写（比如 万能WY, 861XB 等）
+    # 注意：按长度倒序匹配，防止 WNWY 被错误匹配成 WY 并返回 WN尾翼
+    for abbr, cn in sorted(_ABBR_TO_CN.items(), key=lambda x: len(x[0]), reverse=True):
         if s.endswith(abbr):
             prefix = s[:-len(abbr)]
-            if prefix and any(ch.isdigit() for ch in prefix):
+            # ★ 核心修复：去除了“前缀必须包含数字”的限制，只要前缀不为空，就转成中文
+            if prefix:
                 return prefix + cn
 
     return s
