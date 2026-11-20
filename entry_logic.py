@@ -33,7 +33,17 @@ class EntryManager:
         return str(name).strip() in ("时间", "样品")
 
     def _eval_quantity(self, expr):
-        expr = str(expr).replace(" ", "")
+        expr = str(expr).strip()
+        if not expr:
+            return None
+        # 先处理各种分隔符（空格、中英文逗号、顿号等），把它们变成加号
+        expr = expr.replace("，", "+").replace("、", "+").replace(",", "+")
+        expr = re.sub(r'\s+', '+', expr)
+        # 去除连续加号
+        expr = re.sub(r'\++', '+', expr)
+        expr = expr.strip('+')
+
+        # 校验是否符合安全字符集
         allowed = set("0123456789.+-*/()")
         if not all(ch in allowed for ch in expr):
             return None
@@ -429,16 +439,32 @@ class EntryManager:
             effective_last = 2 + i
             break
 
-        if effective_last is None: return
-
         total_row = ROW_TOTAL if self._is_ganmo(wb_name) else ROW_PRICE
         sum_row = ROW_AMOUNT if self._is_ganmo(wb_name) else ROW_SUM
 
-        # 不再使用 ClearContents 清空整行，而是直接覆盖写入
-        if effective_last == 2:
-            label_col, formula_col = effective_last, effective_last + 1
+        # ★ 核心修复：先清除该行所有旧的“总计：”及其公式，防止越插越多
+        try:
+            for c in range(2, last_col + 3):
+                # 清空旧的“总计：”标签
+                val = sh.Cells(total_row, c).Value
+                if val is not None and "总计" in str(val):
+                    sh.Cells(total_row, c).ClearContents()
+
+                # 清空相邻的 SUM 公式
+                formula = sh.Cells(total_row, c).Formula
+                if formula and isinstance(formula, str) and formula.upper().startswith("=SUM"):
+                    sh.Cells(total_row, c).ClearContents()
+        except Exception:
+            pass
+
+        if effective_last is None: return
+
+        if effective_last <= 2:
+            label_col = 2
+            formula_col = 3
         else:
-            label_col, formula_col = effective_last - 1, effective_last
+            label_col = effective_last - 1
+            formula_col = effective_last
 
         try:
             sh.Cells(total_row, label_col).Value = "总计："

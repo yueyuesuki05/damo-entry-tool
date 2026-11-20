@@ -7,6 +7,7 @@ import os
 import re
 import datetime
 from collections import defaultdict
+
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QMessageBox, QListWidget,
@@ -19,6 +20,12 @@ from PySide6.QtGui import QIntValidator  # 用于限制输入框只能输数字
 from wps_connector import WPSConnector
 from entry_logic import EntryManager
 from price_loader import PriceTable
+
+def _split_list(text):
+    """把用空格/逗号/顿号分隔的字符串转成列表"""
+    if not text: return []
+    text = str(text).strip().replace("，", ",").replace("、", ",")
+    return [x.strip() for x in re.split(r'[\s,]+', text) if x.strip()]
 
 
 class ShiftSelectListWidget(QListWidget):
@@ -50,6 +57,11 @@ class ShiftSelectListWidget(QListWidget):
 
         super().mousePressEvent(event)
 
+    def _split_list(text):
+        """把用空格/逗号/顿号分隔的字符串转成列表"""
+        if not text: return []
+        text = str(text).strip().replace("，", ",").replace("、", ",")
+        return [x.strip() for x in re.split(r'[\s,]+', text) if x.strip()]
 
 class FlowLayout(QLayout):
     def __init__(self, parent=None, margin=0, h_spacing=6, v_spacing=6):
@@ -1621,136 +1633,128 @@ class MainWindow(QWidget):
     def do_batch_entry(self):
         if not self.batch_mode: return
         person = self.batch_persons[self.batch_index]
-        total = len(self.batch_persons)
-        m = self.txt_model.text().strip()
-        if m: self.batch_model = m
+        total_persons = len(self.batch_persons)
+
+        models_str = self.txt_model.text().strip()
+        if models_str: self.batch_model = models_str
         if not self.batch_model:
             self.log.setText("请先输入型号")
             self.txt_model.setFocus()
             return
-        qty = self.txt_qty.text().strip()
-        if not qty:
+
+        qty_str = self.txt_qty.text().strip()
+        if not qty_str:
             self.log.setText(f"请输入数量（{person}）")
             return
+
         day = self.txt_day.text().strip()
         if not day:
             self.log.setText("请先填写日期")
             self.txt_day.setFocus()
             return
 
-        try:
-            current = self.conn.get_active_sheet_name()
-            if current != person:
-                self.conn.activate_sheet(person)
-                self._last_sheet = person
-                self.refresh_sheets()
-        except Exception:
-            pass
+        models = _split_list(self.batch_model)
+        qty_exprs = _split_list(qty_str)
 
-        undo_before = len(self.manager.undo_stack)
-        self.setEnabled(False)
-        QApplication.processEvents()
-        try:
-            ok, msg = self.manager.entry(person, day, self.batch_model, qty)
-        finally:
-            self.setEnabled(True)
-            self.activateWindow()
-            QApplication.processEvents()
-
-        self.log.setText(msg)
-        if not ok:
-            self._show_msg(QMessageBox.Warning, "批量录入失败", f"{person}: {msg}")
+        # ★ 极度重要：型号个数必须与数量个数完全一致
+        if len(models) != len(qty_exprs):
+            self._show_msg(
+                QMessageBox.Warning,
+                "数量不匹配",
+                f"当前人员 [{person}]：您输入了 {len(models)} 个型号，却输入了 {len(qty_exprs)} 个数量。\n"
+                f"请确保型号与数量一一对应。本次不执行录入，请修改后重试。"
+            )
             return
-
-        if len(self.manager.undo_stack) > undo_before:
-            rec = self.manager.undo_stack[-1]
-            self.batch_history.append({"person": person, "model": self.batch_model, "qty": qty, "record": rec})
-
-        # 每次录完当前人员，立刻保存工作簿
-        self.conn.save_active()
-
-        try:
-            self.settings.setValue("last_day", day)
-            self.settings.setValue("last_model", self.batch_model)
-        except Exception:
-            pass
-
-        self.txt_qty.clear()
-        self.batch_index += 1
-
-        if self.batch_index >= total:
-            done_model = self.batch_model
-            done_count = total
-            self.batch_mode = False
-            self.batch_model = ""
-            self.batch_persons = []
-            self.batch_index = 0
-            self.batch_history = []
-            self.btn_batch.setText("批量录入")
-            self.txt_model.setPlaceholderText("")
-            self.txt_qty.setFocus()
-            self.log.setText(f"批量录入完成：{done_model}，共 {done_count} 人")
-            self._show_msg(QMessageBox.Information, "批量录入", f"全部完成！\n型号：{done_model}\n共 {done_count} 人")
-        else:
-            next_person = self.batch_persons[self.batch_index]
-            try:
-                # 强制恢复 WPS 屏幕刷新，并激活下一个人名的 Sheet
-                if self.conn.app:
-                    self.conn.app.ScreenUpdating = True
-
-                self.conn.activate_sheet(next_person)
-
-                # 确保 WPS 界面跟着切换过去
-                if self.conn.app:
-                    self.conn.app.ActiveWindow.ScrollRow = 1  # 让页面滚回顶部，方便核对
-
-                self._last_sheet = next_person
-                self.refresh_sheets()
-            except Exception as e:
-                print("切换 sheet 失败:", e)
-
-            self.txt_qty.setFocus()
-            idx = self.batch_index + 1
-            self.log.setText(
-                f"批量录入：{self.batch_model} - {next_person}（{idx}/{total}）\n请输入数量；Ctrl+Z 撤回上一步；ESC 退出批量")
 
     def do_batch_undo(self):
         if not self.batch_history:
             self._show_msg(QMessageBox.Information, "批量回退", "没有可回退的操作（已经是第一步）")
             return
-        item = self.batch_history.pop()
+
+        item = self.batch_history[-1]  # 先看一眼，确认了再 pop
         person = item["person"]
-        rec = item["record"]
+        recs = item.get("records", [])
+
+        if not recs:
+            return
+
+        # ★ 解析刚才那批录入的详细内容
+        models_list = _split_list(item.get("model", ""))
+        qtys_list = _split_list(item.get("qty", ""))
+
+        models_str = "、".join(models_list)
+        qtys_str = "、".join(qtys_list)
+
+        last_model = models_list[-1] if models_list else "未知"
+        last_qty = qtys_list[-1] if qtys_list else "未知"
+
+        # 构建详细确认提示
+        msg = (
+            f"您即将撤回上一步批量录入的数据，请确认：\n\n"
+            f"【人员】{person}\n"
+            f"【本次录入型号】{models_str}\n"
+            f"【对应数量】{qtys_str}\n\n"
+            f"⚠️ 注意：本次撤回将**整体撤销**这 {len(recs)} 个型号的操作。\n"
+            f"其中最后录入的型号是【{last_model}】，数量是【{last_qty}】。\n\n"
+            f"确认要撤回吗？"
+        )
+
+        reply = self._show_msg(QMessageBox.Question, "确认批量撤回", msg, QMessageBox.Yes | QMessageBox.No,
+                               QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # 用户确认后，正式出栈
+        self.batch_history.pop()
 
         self.setEnabled(False)
         QApplication.processEvents()
+
+        undo_success_models = []
+
         try:
             wb = self.conn.get_active_workbook()
             if wb is None:
                 self._show_msg(QMessageBox.Warning, "批量回退", "未检测到工作簿")
                 return
-            sh = wb.Sheets(rec["sheet_name"])
-            if rec["inserted"]:
-                sh.Columns(rec["col"]).Delete()
-            else:
-                old = rec.get("old_value")
-                is_empty = (old is None)
-                if not is_empty:
-                    try:
-                        if abs(float(old)) < 1e-9: is_empty = True
-                    except (ValueError, TypeError):
-                        is_empty = False
-                if is_empty:
-                    sh.Cells(rec["row"], rec["col"]).ClearContents()
+
+            # 按倒序撤回，防止列号错乱
+            for rec in reversed(recs):
+                sh = wb.Sheets(rec["sheet_name"])
+
+                # 查一下这个操作对应的型号，方便状态栏提示
+                m_name = "未知型号"
+                try:
+                    val = sh.Cells(2, rec["col"]).Value
+                    if val: m_name = str(val).strip()
+                except:
+                    pass
+
+                if rec["inserted"]:
+                    sh.Columns(rec["col"]).Delete()
                 else:
-                    sh.Cells(rec["row"], rec["col"]).Value = old
-            try:
-                self.manager._update_total(sh, wb.Name)
-            except Exception:
-                pass
+                    old = rec.get("old_value")
+                    is_empty = (old is None)
+                    if not is_empty:
+                        try:
+                            if abs(float(old)) < 1e-9: is_empty = True
+                        except (ValueError, TypeError):
+                            is_empty = False
+                    if is_empty:
+                        sh.Cells(rec["row"], rec["col"]).ClearContents()
+                    else:
+                        sh.Cells(rec["row"], rec["col"]).Value = old
+
+                undo_success_models.append(m_name)
+
+                try:
+                    self.manager._update_total(sh, wb.Name)
+                except Exception:
+                    pass
+                if self.manager.undo_stack and self.manager.undo_stack[-1] is rec:
+                    self.manager.undo_stack.pop()
+
             self.conn.save_active()
-            if self.manager.undo_stack and self.manager.undo_stack[-1] is rec:
-                self.manager.undo_stack.pop()
         except Exception as e:
             self._show_msg(QMessageBox.Warning, "批量回退", f"恢复失败：{e}")
             return
@@ -1759,6 +1763,7 @@ class MainWindow(QWidget):
             self.activateWindow()
             QApplication.processEvents()
 
+        # 将界面恢复到被撤回的那个人的状态
         try:
             self.batch_index = self.batch_persons.index(person)
         except ValueError:
@@ -1774,10 +1779,14 @@ class MainWindow(QWidget):
         self.txt_qty.setFocus()
         total = len(self.batch_persons)
         idx = self.batch_index + 1
-        #★ 提取具体型号和行号
-        model_name = item.get("model", "未知型号")
-        row_num = rec.get("row", "?")
-        self.log.setText(f"已回退到：{person}（{idx}/{total}）\n型号：{self.batch_model}，请重新输入数量")
+
+        # ★ 底部状态栏也详细显示撤回了什么
+        success_models_str = "、".join(undo_success_models)
+        self.log.setText(
+            f"已撤销人员【{person}】的上一步批量录入。\n"
+            f"成功移除了型号：{success_models_str}\n"
+            f"当前进度回退至：{person}（{idx}/{total}），请重新输入型号和数量"
+        )
 
     def _cancel_batch(self):
         self.batch_mode = False
@@ -2171,27 +2180,65 @@ class MainWindow(QWidget):
         if not sheet:
             self._show_msg(QMessageBox.Warning, "提示", "未检测到 WPS 活动 sheet。")
             return
-        current_model = self.txt_model.text().strip()
-        current_qty = self.txt_qty.text().strip()
 
-        self.txt_model.setEnabled(False)
-        self.txt_qty.setEnabled(False)
+        models_str = self.txt_model.text().strip()
+        qty_str = self.txt_qty.text().strip()
+
+        models = _split_list(models_str)
+        qty_exprs = _split_list(qty_str)
+
+        if not models:
+            self._show_msg(QMessageBox.Warning, "提示", "请输入型号。")
+            return
+        if not qty_exprs:
+            self._show_msg(QMessageBox.Warning, "提示", "请输入数量。")
+            return
+
+        # ★ 极度重要：型号个数必须与数量个数完全一致
+        if len(models) != len(qty_exprs):
+            self._show_msg(
+                QMessageBox.Warning,
+                "数量不匹配",
+                f"您输入了 {len(models)} 个型号，却输入了 {len(qty_exprs)} 个数量。\n"
+                f"请确保型号与数量一一对应（例如：型号 [123, 321]，数量 [22, 33]）。\n"
+                f"为防止数据错乱，本次不执行任何录入，请修改后重试。"
+            )
+            return
+
         self.setEnabled(False)
         QApplication.processEvents()
 
+        success_count = 0
+        fail_msgs = []
+        last_msg = ""
+
         try:
-            ok, msg = self.manager.entry(sheet, self.txt_day.text(), current_model, current_qty)
-            if ok:
+            if self.conn.app:
+                self.conn.app.ScreenUpdating = False
+
+            for m, q in zip(models, qty_exprs):
+                ok, msg = self.manager.entry(sheet, self.txt_day.text(), m, q)
+                if ok:
+                    success_count += 1
+                    last_msg = msg
+                else:
+                    fail_msgs.append(f"[{m}: {q}] {msg}")
+
+            if success_count > 0:
                 self.conn.save_active()
         finally:
+            if self.conn.app:
+                self.conn.app.ScreenUpdating = True
             self.setEnabled(True)
             self.activateWindow()
-            self.txt_model.setEnabled(True)
-            self.txt_qty.setEnabled(True)
             QApplication.processEvents()
 
-        self.log.setText(msg)
-        if ok:
+        if fail_msgs:
+            self._show_msg(QMessageBox.Warning, "部分录入失败", "\n".join(fail_msgs))
+
+        if success_count > 0:
+            self.log.setText(f"批量录入完成，共成功 {success_count} 个型号。\n最后一条：{last_msg}")
+
             wb_name = self.conn.get_workbook_name()
             if wb_name and sheet:
                 try:
@@ -2199,16 +2246,17 @@ class MainWindow(QWidget):
                 except Exception:
                     pass
             self.settings.setValue("last_day", self.txt_day.text())
-            if current_model:
-                self.settings.setValue("last_model", current_model)
-                self.txt_model.setPlaceholderText(f"上次填过：{current_model}（空着不算填）")
+            if models:
+                self.settings.setValue("last_model", models[0])
+                self.txt_model.setPlaceholderText(f"上次填过：{models[0]}（空着不算填）")
+
             self.txt_qty.clear()
             self.txt_model.clear()
             self.txt_model.setFocus()
             self.refresh_sheets()
             QTimer.singleShot(50, self._refocus)
         else:
-            self._show_msg(QMessageBox.Warning, "录入失败", msg)
+            self._show_msg(QMessageBox.Warning, "录入失败", "所有型号录入均失败。")
 
     def do_undo(self):
         if self.batch_mode and self.batch_history:
