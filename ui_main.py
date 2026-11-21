@@ -22,11 +22,24 @@ from entry_logic import EntryManager
 from price_loader import PriceTable
 
 def _split_list(text):
-    """把用空格/逗号/顿号分隔的字符串转成列表"""
+    """把用空格/逗号/顿号分隔的字符串转成列表（完美兼容任意数量的连续空格）"""
     if not text: return []
     text = str(text).strip().replace("，", ",").replace("、", ",")
+    # 核心修复：把所有的连续空白字符（无论几个空格/Tab）全部压缩成一个空格
+    text = re.sub(r'\s+', ' ', text)
     return [x.strip() for x in re.split(r'[\s,]+', text) if x.strip()]
 
+def _eval_math_expr(text):
+    """解析并计算表达式，完美支持加减乘除及多余空格"""
+    if not text: return None
+    s = str(text).strip().replace("，", "+").replace(",", "+").replace("、", "+")
+    # 将多余的空格全部去掉，因为表达式内部的空格是不需要的
+    s = re.sub(r'\s+', '', s)
+    if not re.fullmatch(r'[\d.+\-*/()]+', s): return None
+    try:
+        return float(eval(s))
+    except Exception:
+        return None
 
 class ShiftSelectListWidget(QListWidget):
     """自定义列表控件：支持 Shift 键连选，且保留直接点击多选的功能"""
@@ -334,18 +347,44 @@ class MultiDialog(QDialog):
     def do_multi_entry(self):
         selected = [i.text() for i in self.list_widget.selectedItems()]
         day = self.txt_day.text().strip()
-        model = self.txt_model.text().strip()
-        total = self.txt_total.text().strip()
+        models_str = self.txt_model.text().strip()
+        total_str = self.txt_total.text().strip()
 
         missing = []
         if not selected: missing.append("合作人员")
         if not day: missing.append("日期")
-        if not model: missing.append("型号")
-        if not total: missing.append("总数")
+        if not models_str: missing.append("型号")
+        if not total_str: missing.append("总数")
 
         if missing:
             self.lbl_status.setText("未填写完整：" + "、".join(missing))
             return
+
+        models = _split_list(models_str)
+        totals = _split_list(total_str)
+
+        if not models:
+            self.lbl_status.setText("型号不能为空。")
+            return
+
+        # 如果总数只有 1 个，且型号有多个，说明用户可能输入的是一整批共用的数量总和，自动平分？或者不支持？
+        # 这里我们遵循严格的一一对应原则，否则就报错
+        if len(models) != len(totals):
+            self.lbl_status.setText(
+                f"型号数量({len(models)})与总数数量({len(totals)})不一致。\n"
+                f"请用逗号或空格分隔一一对应。\n"
+                f"若数量本身是算式（如 720+540），请确保算式内部不加多余空格，或使用逗号分隔多个算式。"
+            )
+            return
+
+        # 验证每个总数表达式是否合法
+        total_nums = []
+        for t_expr in totals:
+            val = _eval_math_expr(t_expr)
+            if val is None:
+                self.lbl_status.setText(f"总数表达式不合法：{t_expr}")
+                return
+            total_nums.append(val)
 
         self.btn_entry.setEnabled(False)
         self.txt_model.setEnabled(False)
@@ -357,15 +396,6 @@ class MultiDialog(QDialog):
         QApplication.processEvents()
 
         n = len(selected)
-        try:
-            total_num = float(total)
-        except ValueError:
-            self.lbl_status.setText("总数不合法。")
-            self.btn_entry.setEnabled(True)
-            self.txt_model.setEnabled(True)
-            self.txt_total.setEnabled(True)
-            return
-
         results = []
         actual_success_count = 0
 
@@ -374,23 +404,26 @@ class MultiDialog(QDialog):
                 self.lbl_status.setText(f"正在录入 {name} ({i + 1}/{n})...")
                 QApplication.processEvents()
 
-                # 录入前，先让 WPS/Excel 跳转到当前录入人员的 sheet，方便直观看到录入过程
                 try:
                     self.manager.conn.activate_sheet(name)
                     QApplication.processEvents()
                 except Exception:
                     pass
 
-                ok, msg = self.manager.entry(name, day, model, str(total_num / n))
-                if ok:
-                    actual_success_count += 1
-                results.append(f"{name}: {'成功' if ok else '失败：' + msg}")
+                person_ok = True
+                for m, t_val in zip(models, total_nums):
+                    per_person_qty = t_val / n
+                    ok, msg = self.manager.entry(name, day, m, str(per_person_qty))
+                    if not ok:
+                        person_ok = False
+                        results.append(f"{name} - 型号 {m} 失败：{msg}")
+                        break
 
-            # 多人合作录入完毕后，统一保存一次工作簿
+                if person_ok:
+                    actual_success_count += 1
+
             if actual_success_count > 0:
                 self.manager.conn.save_active()
-
-                # 所有人员录入完毕后，统一刷新一次主界面
                 if self.parent_window:
                     try:
                         self.parent_window._last_sheet = selected[-1] if selected else ""
@@ -398,9 +431,12 @@ class MultiDialog(QDialog):
                     except Exception:
                         pass
 
-            msg_all = "\n".join(results)
+            if not results:
+                msg_all = f"成功为 {actual_success_count} 人录入了 {len(models)} 个型号。"
+            else:
+                msg_all = "\n".join(results)
         except Exception as e:
-            msg_all = str(e)
+            msg_all = f"录入发生异常：{e}"
 
         self.btn_entry.setEnabled(True)
         self.txt_model.setEnabled(True)
@@ -412,9 +448,9 @@ class MultiDialog(QDialog):
         if self.batch_count > 0:
             self.btn_undo.setEnabled(True)
             self.settings.setValue("multi_last_day", day)
-            self.settings.setValue("multi_last_model", model)
+            self.settings.setValue("multi_last_model", models_str)
             self._save_last_selection(selected)
-            self.txt_model.setPlaceholderText(f"上次填过：{model}（空着不算填）")
+            self.txt_model.setPlaceholderText(f"上次填过：{models_str}（空着不算填）")
             self.txt_model.clear()
             self.txt_total.clear()
             self.txt_model.setFocus()
